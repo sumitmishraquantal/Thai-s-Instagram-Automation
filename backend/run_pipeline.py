@@ -4,8 +4,10 @@ import argparse
 import asyncio
 import json
 import sys
+import logging
 
 from app.services.pipeline import run_podcast_pipeline
+logging.basicConfig(level=logging.INFO)
 
 
 def main():
