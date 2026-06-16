@@ -1,18 +1,19 @@
 # Reel Studio — Automated Instagram Reel Pipeline
 
-Backend-only automation for podcast-style Instagram Reels: Groq picks category and
-topic, generates a 30–35s Q&A script, synthesizes host/guest voices via ElevenLabs,
-renders and splits audio, builds a scene blueprint, and generates the final video.
+Backend-only automation for podcast-style Instagram Reels: live research from
+YouTube + Serper, Groq picks category and topic, generates a 30–35s Q&A script,
+synthesizes host/guest voices via ElevenLabs, renders and splits audio, builds a
+scene blueprint, and generates the final video.
 
 ## Stack
 
-- **Backend** — FastAPI (Python 3.12) · Groq (LLM) · ElevenLabs v3 (TTS) · Higgsfield/Seedance (video)
+- **Backend** — FastAPI (Python 3.12) · Groq (LLM) · YouTube Data API v3 + Serper (research) · ElevenLabs v3 (TTS) · Higgsfield/Seedance (video)
 - **Deploy** — Docker Compose (backend on port 8000)
 
 ## Pipeline flow
 
 1. Pick category (`DEFAULT_CATEGORY` env or Groq auto-select)
-2. Research trending subtopics (`fetch_trending_topics`)
+2. **Live research** — YouTube (recent popular videos) + Serper (web/news) → Groq distills 5 topics
 3. Groq picks the best topic (`select_best_topic`)
 4. Generate script (`generate_script`)
 5. Synthesize + render audio, split into segments (`render_final_audio`)
@@ -31,8 +32,19 @@ pip install -r requirements.txt
 
 copy .env.example .env        # Windows (or: cp .env.example .env)
 # Edit backend/.env — at minimum:
-#   GROQ_API_KEY, ELEVENLABS_API_KEY, HF_API_KEY + HF_API_SECRET (or HF MCP OAuth)
+#   GROQ_API_KEY, YOUTUBE_API_KEY, SERPER_API_KEY, ELEVENLABS_API_KEY, HF_API_KEY + HF_API_SECRET
 ```
+
+### Topic research keys
+
+| Env var | Source |
+|---------|--------|
+| `YOUTUBE_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → enable **YouTube Data API v3** → Credentials → API key |
+| `SERPER_API_KEY` | [serper.dev](https://serper.dev/) dashboard |
+
+Optional tuning: `YOUTUBE_REGION_CODE`, `RESEARCH_LOOKBACK_DAYS` (default 30), `SERPER_GL` / `SERPER_HL`.
+
+If both research keys are missing, Groq falls back to model-generated topic suggestions.
 
 ### Voice IDs (ElevenLabs)
 

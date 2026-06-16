@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     groq_model: str = "llama-3.3-70b-versatile"
     elevenlabs_model: str = "eleven_v3"
 
+    # Topic research (YouTube Data API v3 + Serper)
+    youtube_api_key: str = ""
+    serper_api_key: str = ""
+    youtube_region_code: str = "US"
+    youtube_relevance_language: str = "en"
+    serper_gl: str = "us"
+    serper_hl: str = "en"
+    research_lookback_days: int = 30
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

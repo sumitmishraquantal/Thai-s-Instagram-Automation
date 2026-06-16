@@ -2,7 +2,7 @@
 
 Providers:
   anthropic — Claude with web search for trending topics (best quality)
-  groq      — free-tier Llama 3.3 70B (no web search; topics are model-generated)
+  groq      — free-tier Llama 3.3 70B; topic research uses YouTube + Serper when configured
   mock      — instant canned output, zero API cost, for UI/TTS testing
 """
 import json
@@ -14,6 +14,7 @@ import httpx
 
 from ..config import get_settings
 from ..schemas import SceneBlueprint, ScriptPackage, TrendingTopic
+from . import research_sources
 
 logger = logging.getLogger(__name__)
 
@@ -302,12 +303,25 @@ async def fetch_trending_topics(category: str) -> list[TrendingTopic]:
     if provider == "mock":
         return [TrendingTopic(**t) for t in MOCK_TOPICS]
 
-    use_search = provider == "anthropic"
-    search_clause = (
-        "Search the web for trending discussions, recent news, and viral conversations this week"
-        if use_search
-        else "Suggest five timely, resonant discussion topics"
-    )
+    s = get_settings()
+    signals = await research_sources.gather_research_signals(category)
+    signals_block = research_sources.format_signals_for_prompt(signals)
+    has_live_data = bool(signals)
+
+    use_anthropic_search = provider == "anthropic" and not has_live_data
+    if has_live_data:
+        search_clause = (
+            "Using ONLY the real research signals below (YouTube + web), distill five "
+            "timely discussion topics that would work as 30-second Instagram Reels. "
+            "Ground each topic in the signals — do not invent unrelated ideas."
+        )
+    elif use_anthropic_search:
+        search_clause = (
+            "Search the web for trending discussions, recent news, and viral conversations this week"
+        )
+    else:
+        search_clause = "Suggest five timely, resonant discussion topics"
+
     lenses = random.sample([
         "a surprising statistic", "a common misconception", "a daily habit",
         "a relationship dynamic", "a workplace angle", "a science-backed insight",
@@ -316,6 +330,10 @@ async def fetch_trending_topics(category: str) -> list[TrendingTopic]:
     ], 5)
     prompt = (
         f'{search_clause} about "{category}" that would resonate on Instagram Reels.\n'
+    )
+    if has_live_data:
+        prompt += f"\nLIVE RESEARCH SIGNALS:\n{signals_block}\n\n"
+    prompt += (
         f'Make the 5 topics genuinely different from each other — for variety, draw on lenses such as: {", ".join(lenses)}.\n'
         'Do not repeat generic evergreen topics; be specific and fresh.\n'
         'Respond ONLY with valid JSON (no markdown, no preamble) in exactly this shape:\n'
@@ -323,7 +341,9 @@ async def fetch_trending_topics(category: str) -> list[TrendingTopic]:
         'Exactly 5 items. IMPORTANT: do NOT use double-quote characters inside any '
         'string value — phrase angles without quotation marks. Use plain apostrophes for contractions.'
     )
-    raw = await _call_llm_json(prompt, use_search=use_search, max_tokens=1500, temperature=0.7)
+    raw = await _call_llm_json(
+        prompt, use_search=use_anthropic_search, max_tokens=1500, temperature=0.7
+    )
     items = raw.get("topics", raw) if isinstance(raw, dict) else raw
     return [TrendingTopic(**t) for t in items[:5]]
 
