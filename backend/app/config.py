@@ -42,6 +42,20 @@ class Settings(BaseSettings):
     seedance_bilingual_prompt: bool = False
     establishing_two_shot: bool = True
 
+    # Approval workflow (pause before video generation)
+    owner_emails: str = ""
+    approval_base_url: str = "http://localhost:8000"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    email_transport: str = "auto"
+    composio_api_key: str = ""
+    gmail_sender: str = ""
+    composio_user_id: str = ""
+    composio_toolkit_version: str = ""
+    require_approval: bool = True
+
     # Scheduled trigger
     schedule_enabled: bool = False
     schedule_cron: str = ""

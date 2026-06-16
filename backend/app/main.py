@@ -2,12 +2,12 @@ import logging
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .schemas import PipelineRequest, PipelineResult
-from .services import higgsfield_video, pipeline, render, scheduler
+from .services import approval_gate, approvals, higgsfield_video, pipeline, render, scheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("reel-studio")
@@ -51,6 +51,60 @@ async def run_pipeline(req: PipelineRequest = PipelineRequest()):
     except Exception as e:  # noqa: BLE001
         logger.exception("Pipeline failed")
         raise HTTPException(500, str(e)) from e
+
+
+@app.get("/api/approvals/act", response_class=HTMLResponse)
+async def approvals_act(token: str, action: str):
+    """Owners' email links land here. First valid action resolves and (on approve)
+    starts video generation."""
+    result = approvals.resolve_by_token(token, action)
+    if result["outcome"] == "invalid":
+        return HTMLResponse(
+            _approval_page("Invalid link", result.get("message", ""), "#dc2626"),
+            status_code=400,
+        )
+
+    fired = approvals.fire_resume_if_approved(result)
+    if not fired and result.get("status") == approvals.APPROVED:
+        rec = result.get("record", {})
+        job_id = approval_gate.resume_after_approval(rec)
+        fired = bool(job_id)
+        if job_id:
+            logger.info("Resumed video job %s after approval %s", job_id, rec.get("id"))
+
+    if result["outcome"] == "already":
+        return HTMLResponse(_approval_page(
+            f"Already {result['status']}",
+            result["message"],
+            "#6b7280",
+        ))
+
+    if result["status"] == approvals.APPROVED:
+        sub = "Video generation has started." if fired else "Approved."
+        return HTMLResponse(_approval_page("Approved", sub, "#16a34a"))
+    return HTMLResponse(_approval_page(
+        "Declined",
+        "The request was declined. Nothing will be generated.",
+        "#dc2626",
+    ))
+
+
+@app.get("/api/approvals/{approval_id}")
+async def approval_status(approval_id: str):
+    rec = approvals.get(approval_id)
+    if not rec:
+        raise HTTPException(404, "Unknown approval id")
+    return {k: v for k, v in rec.items() if k != "owner_tokens"}
+
+
+def _approval_page(title: str, subtitle: str, color: str) -> str:
+    return f"""<!doctype html><html><body style="font-family:Arial,sans-serif;background:#f4f5f7;
+      display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+      <div style="background:#fff;border-radius:14px;padding:40px 48px;text-align:center;
+                  border:1px solid #e5e7eb;max-width:460px">
+        <h1 style="color:{color};margin:0 0 10px">{title}</h1>
+        <p style="color:#444;margin:0">{subtitle}</p>
+      </div></body></html>"""
 
 
 @app.get("/api/video-jobs/{job_id}")

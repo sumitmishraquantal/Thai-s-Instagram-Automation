@@ -18,7 +18,8 @@ scene blueprint, and generates the final video.
 4. Generate script (`generate_script`)
 5. Synthesize + render audio, split into segments (`render_final_audio`)
 6. Generate scene blueprint (`generate_scene_plan`)
-7. Generate per-scene video clips and merge (`run_video_job`)
+7. **Approval gate** (if `REQUIRE_APPROVAL=true`) — email owners script + audio; video starts on approve
+8. Generate per-scene video clips and merge (`run_video_job`)
 
 Output: `backend/renders/<render_id>/video/merged_reel.mp4`
 
@@ -94,12 +95,36 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 |--------|------|---------|
 | GET | `/api/health` | Health check |
 | POST | `/api/run-pipeline` | Run full pipeline (`{"category": "optional"}`) |
+| GET | `/api/approvals/act` | Owner approve/decline links from email |
+| GET | `/api/approvals/{approval_id}` | Approval status |
 | GET | `/api/video-jobs/{job_id}` | Poll video job status |
 | GET | `/api/schedule` | Cron scheduler status |
 | GET | `/api/characters` | Character photo status |
 | GET | `/api/identity-cache` | Locked identity cache status |
 
 Static outputs are served at `/renders/<render_id>/...`.
+
+### Approval workflow
+
+When `REQUIRE_APPROVAL=true` (default), the pipeline stops after blueprint generation and emails owners with approve/decline links. The email includes the **full script** and **combined audio** link — not the scene blueprint.
+
+Set in `backend/.env`:
+
+```
+REQUIRE_APPROVAL=true
+OWNER_EMAILS=you@example.com,teammate@example.com
+APPROVAL_BASE_URL=http://localhost:8000
+```
+
+For approve links to start video generation, keep the API server running:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Then run the pipeline (CLI or `POST /api/run-pipeline`). On approve, video generation starts automatically. Blueprint is saved to `renders/<render_id>/blueprint.json` so approval works even if the pipeline CLI process has exited.
+
+Set `REQUIRE_APPROVAL=false` to skip the gate and go straight to video generation.
 
 ## Docker
 

@@ -91,10 +91,12 @@ class PipelineRequest(BaseModel):
 
 class PipelineResult(BaseModel):
     render_id: str
-    job_id: str
+    job_id: str = ""
     title: str
     category: str
     selected_topic: TrendingTopic
-    merged_video_path: str
+    merged_video_path: str = ""
     audio_path: str
     status: str
+    approval_id: Optional[str] = None
+    message: Optional[str] = None

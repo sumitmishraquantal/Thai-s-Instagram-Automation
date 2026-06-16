@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..config import get_settings
 from ..schemas import PipelineResult, TrendingTopic
-from . import higgsfield_video, llm, render
+from . import approval_gate, higgsfield_video, llm, render
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +75,29 @@ async def run_podcast_pipeline(category: str | None = None) -> PipelineResult:
         script_pkg.lines,
         render_result.segments,
     )
+    print("\n--- Scene blueprint ---\n")
+    print(blueprint.model_dump_json(indent=2))
+    print()
 
-    logger.info("Starting video generation for render %s…", render_result.render_id)
-    job_id = higgsfield_video.start_job(render_result.render_id, blueprint)
+    logger.info("Approval gate / video generation for render %s…", render_result.render_id)
+    gate = approval_gate.gate_video_generation(render_result.render_id, blueprint)
+
+    if gate["status"] == "awaiting_approval":
+        logger.info("Awaiting owner approval (id=%s)", gate["approval_id"])
+        return PipelineResult(
+            render_id=render_result.render_id,
+            job_id="",
+            title=script_pkg.title,
+            category=chosen_category,
+            selected_topic=chosen_topic,
+            merged_video_path="",
+            audio_path=_relative_path(BACKEND_ROOT / "renders" / render_result.render_id),
+            status="awaiting_approval",
+            approval_id=gate["approval_id"],
+            message=gate.get("message"),
+        )
+
+    job_id = gate["job_id"]
     job = await _wait_for_video_job(job_id)
 
     merged_rel = f"renders/{render_result.render_id}/video/merged_reel.mp4"
