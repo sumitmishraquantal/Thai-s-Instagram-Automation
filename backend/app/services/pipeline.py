@@ -105,6 +105,15 @@ async def run_podcast_pipeline(category: str | None = None) -> PipelineResult:
     if merged_path.exists():
         merged_rel = _relative_path(merged_path)
 
+    gdrive_upload = job.get("gdrive_upload")
+    if gdrive_upload:
+        status = gdrive_upload.get("status", "unknown")
+        dest = gdrive_upload.get("dest", "")
+        if status == "ok":
+            logger.info("GDrive upload complete → %s (%d file(s))", dest, len(gdrive_upload.get("files", [])))
+        else:
+            logger.warning("GDrive upload failed → %s — %s", dest, gdrive_upload.get("log", "")[-200:])
+
     result = PipelineResult(
         render_id=render_result.render_id,
         job_id=job_id,
@@ -114,6 +123,7 @@ async def run_podcast_pipeline(category: str | None = None) -> PipelineResult:
         merged_video_path=merged_rel,
         audio_path=_relative_path(BACKEND_ROOT / "renders" / render_result.render_id),
         status=job.get("status", "completed"),
+        gdrive_upload=gdrive_upload,
     )
     logger.info("Pipeline complete: %s", result.merged_video_path)
     return result

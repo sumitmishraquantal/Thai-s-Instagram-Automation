@@ -931,10 +931,98 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
             _merge_with_reel_audio(scene_files, _find_reel_audio(base_dir), merged)
         job["merged_url"] = f"/renders/{render_id}/video/{merged.name}"
 
+        # 5 · thumbnail — two-shot image for the reel cover (never a video scene)
+        try:
+            import shutil as _sh
+            thumb_src = None
+            for cand in (img_dir / "both.png", img_dir / "host.png"):
+                if cand.exists():
+                    thumb_src = cand
+                    break
+            if thumb_src:
+                thumb = base_dir / "thumbnail.png"
+                _sh.copyfile(thumb_src, thumb)
+                job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
+                _update(job, step=(f"Thumbnail saved from the {'two-shot' if thumb_src.name == 'both.png' else 'host'} "
+                                   f"image ({thumb.name})"))
+            else:
+                _update(job, step="No image available for a thumbnail (skipped).")
+        except Exception as e:  # noqa: BLE001 — thumbnail must never fail the reel
+            logger.warning("thumbnail generation failed: %s", e)
+
+        # 6 · GDrive upload — raw scene clips only (no merged reel, thumbnail, or audio)
+        if get_settings().upload_to_gdrive:
+            remote = (get_settings().rclone_remote or "").strip()
+            if not remote:
+                _update(job, step="GDrive upload is ON but RCLONE_REMOTE is empty — skipped.")
+            else:
+                prefix = get_settings().gdrive_clip_prefix or "RawClip"
+                ordered_scenes = sorted(vid_dir.glob("scene_*.mp4"))
+                items: list[tuple[Path, str]] = [
+                    (clip, f"{prefix}{i}{clip.suffix}")
+                    for i, clip in enumerate(ordered_scenes, start=1)
+                ]
+                if not items:
+                    _update(job, step="GDrive upload skipped — no scene clips found.")
+                else:
+                    dest = remote
+                    _update(job, step=(f"Uploading {len(items)} scene clip(s) to GDrive → {dest} "
+                                       f"({prefix}1..{prefix}{len(items)})"))
+                    ok, log = await _rclone_upload_all(items, dest, rclone_exe=get_settings().rclone_exe)
+                    job["gdrive_upload"] = {"status": "ok" if ok else "failed", "dest": dest,
+                                            "files": [n for _, n in items], "log": log[-600:]}
+                    if ok:
+                        _update(job, step=f"Uploaded {len(items)} scene clip(s) to GDrive ({dest}).")
+                        if get_settings().gdrive_delete_local_after_upload:
+                            removed = 0
+                            for src, _name in items:
+                                try:
+                                    src.unlink()
+                                    removed += 1
+                                except Exception:  # noqa: BLE001
+                                    pass
+                            _update(job, step=f"Removed {removed} local scene clip(s) after confirmed upload.")
+                    else:
+                        _update(job, step=f"GDrive upload FAILED — clips kept locally. rclone says: {log[-300:]}")
+
         _update(job, status="completed", step="Done")
     except Exception as e:  # noqa: BLE001 — job must capture any failure
         logger.exception("Video job %s failed", job_id)
         _update(job, status="failed", step="Failed", error=str(e))
+
+
+async def _rclone_upload_all(items: list[tuple[Path, str]], dest: str, *,
+                             rclone_exe: str = "rclone") -> tuple[bool, str]:
+    """Upload files to the rclone destination in one command. Returns (ok, log)."""
+    import shutil
+    import tempfile
+
+    items = [(Path(s), n) for (s, n) in items if s and Path(s).exists()]
+    if not items:
+        return False, "no files to upload"
+    stage = Path(tempfile.mkdtemp(prefix="rclone_stage_"))
+    try:
+        for src, name in items:
+            shutil.copy2(src, stage / name)
+        cmd = [rclone_exe, "copy", str(stage), dest,
+               "--transfers", "8", "--checkers", "8",
+               "--drive-chunk-size", "64M", "--no-traverse", "-v"]
+        env = os.environ.copy()
+        _cfg = (get_settings().rclone_config or "").strip()
+        if _cfg:
+            env["RCLONE_CONFIG"] = _cfg
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env)
+        out, _ = await proc.communicate()
+        log = (out or b"").decode("utf-8", "replace")[-4000:]
+        return proc.returncode == 0, (log or f"rclone exit {proc.returncode}")
+    except FileNotFoundError:
+        return False, (f"rclone executable not found ('{rclone_exe}'). Install rclone or set "
+                       f"RCLONE_EXE to its full path.")
+    except Exception as e:  # noqa: BLE001
+        return False, f"rclone failed to launch: {e}"
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def clear_identity_cache(role: str | None = None) -> list[str]:

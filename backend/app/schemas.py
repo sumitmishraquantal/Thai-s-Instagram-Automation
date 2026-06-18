@@ -100,3 +100,4 @@ class PipelineResult(BaseModel):
     status: str
     approval_id: Optional[str] = None
     message: Optional[str] = None
+    gdrive_upload: Optional[dict] = None
