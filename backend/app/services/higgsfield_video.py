@@ -7,8 +7,8 @@
 #     no video chaining. duration 2-12s, resolution 480/720/1080, aspect 9:16 supported.
 
 # Consistency strategy under these constraints:
-#   1. Soul Reference turns YOUR Ron photo into "Ron at the desk in the studio" once,
-#      and YOUR Jason photo into "Jason at the desk" once.
+#   1. Soul Reference turns YOUR Ron photo into "Ron in the studio armchair" once,
+#      and YOUR Jason photo into "Jason in the studio armchair" once.
 #   2. Every scene where Ron speaks starts from the SAME Ron image; same for Jason.
 #      Identical start frames = locked identity, wardrobe, set across the reel.
 #   3. Each clip is trimmed to the exact segment duration, concatenated, and the
@@ -33,7 +33,7 @@
 
 # from ..config import get_settings
 # from ..schemas import Scene, SceneBlueprint
-# from . import higgsfield_mcp, llm
+# from . import director_skills, higgsfield_mcp, image_prep, llm
 # from .render import RENDERS_DIR
 
 # logger = logging.getLogger(__name__)
@@ -63,9 +63,17 @@
 #     return h.hexdigest()[:16]
 
 
-# def _identity_cache_load(role: str, signature: str) -> dict | None:
-#     meta = IDENTITY_CACHE_DIR / f"{role}.json"
-#     png = IDENTITY_CACHE_DIR / f"{role}.png"
+# def _cache_stem(role: str, key: str = "") -> str:
+#     """Cache filename stem. With a variation profile key, each look is cached
+#     separately (role__profile) so a new reel's profile regenerates while a repeat
+#     profile reuses; without a key it's the legacy single-look stem (role)."""
+#     return f"{role}__{key}" if key else role
+
+
+# def _identity_cache_load(role: str, signature: str, key: str = "") -> dict | None:
+#     stem = _cache_stem(role, key)
+#     meta = IDENTITY_CACHE_DIR / f"{stem}.json"
+#     png = IDENTITY_CACHE_DIR / f"{stem}.png"
 #     if meta.exists() and png.exists():
 #         try:
 #             data = json.loads(meta.read_text(encoding="utf-8"))
@@ -81,17 +89,30 @@
 
 
 # def _identity_cache_save(role: str, signature: str, url: str, ref: str, src_png: Path,
-#                           locked: bool = False):
+#                           locked: bool = False, key: str = ""):
 #     import shutil
-#     dest_png = IDENTITY_CACHE_DIR / f"{role}.png"
+#     stem = _cache_stem(role, key)
+#     dest_png = IDENTITY_CACHE_DIR / f"{stem}.png"
 #     if Path(src_png).resolve() != dest_png.resolve():
 #         shutil.copyfile(src_png, dest_png)
-#     (IDENTITY_CACHE_DIR / f"{role}.json").write_text(
+#     (IDENTITY_CACHE_DIR / f"{stem}.json").write_text(
 #         json.dumps({"signature": signature, "url": url, "ref": ref, "locked": locked}, indent=2),
 #         encoding="utf-8",
 #     )
 
 # SEEDANCE_MIN_DUR, SEEDANCE_MAX_DUR = 2, 12
+
+# _VALID_VIDEO_RES = {"480p", "720p", "1080p"}
+
+
+# def _norm_video_resolution(value: str) -> str:
+#     """Coerce a config/env resolution into a value Seedance accepts. Seedance only
+#     allows 480p / 720p / 1080p (the trailing 'p' is REQUIRED), so '1080' -> '1080p'.
+#     Anything unrecognized falls back to 720p rather than erroring the whole clip."""
+#     v = (value or "").strip().lower()
+#     if v and not v.endswith("p") and v.isdigit():
+#         v = v + "p"
+#     return v if v in _VALID_VIDEO_RES else "720p"
 
 
 # # ── Character photo storage ───────────────────────────────
@@ -184,39 +205,218 @@
 #         dest.write_bytes(r.content)
 
 
-# # A FIXED, literal set description used identically in BOTH identity prompts so
-# # the host and guest render in the SAME room (same wall art, same props). The
-# # freeform canon studio sentence is appended for overall mood, but these exact
-# # details prevent per-character drift (e.g. desert photos vs beach photos).
+# # The UNCHANGING room structure — same in every reel. The specific poster art,
+# # decor objects and wardrobe are NOT fixed here; they come from a per-reel variation
+# # profile (below) so different reels look fresh while staying consistent within a reel.
+# _STUDIO_STRUCTURE = (
+#     "a modern in-person podcast studio: a tall matte-black built-in bookshelf-and-cabinet back wall with "
+#     "warm interior LED accent lighting, glass-front upper cabinets and cane/rattan-front lower cabinets; the "
+#     "people sit in mid-century grey upholstered armchairs with wooden frames; a black dynamic microphone on a "
+#     "black boom arm reaches in from the side; a neutral area rug on a dark wood floor; warm, moody, low-key "
+#     "cinematic lighting"
+# )
+
+# # Per-reel VARIATION PROFILES. Each new reel rotates to the next profile so the wall
+# # art, the objects on the shelves and the speakers' clothing change between reels —
+# # while the room, the faces and (within one reel) everything stay consistent. Faces
+# # are always preserved from the real reference photo; only background + wardrobe vary.
+# _VARIATION_PROFILES = [
+#     {
+#         "id": "modern_abstract",
+#         "poster": "a large framed original abstract painting with bold muted color blocks and gestural brush "
+#                   "strokes — NO text, NO words, no logos and no recognizable artwork",
+#         "decor": "stacked plain hardcover books, a small green potted plant, a smooth ceramic vase and a "
+#                  "polished live-edge wood-slice sculpture on a stand",
+#         "wardrobe": {"host": "a plain charcoal crew-neck sweater (no logos)",
+#                      "guest": "a plain black short-sleeve polo shirt (no logos or text)"},
+#     },
+#     {
+#         "id": "nature_photo",
+#         "poster": "a large framed black-and-white nature photograph of misty forest trees in a thin matte-black "
+#                   "frame — NO text, no words, no logos",
+#         "decor": "a softly glowing geode lamp, a small succulent, a folded wool throw and a few plain books",
+#         "wardrobe": {"host": "a plain dark navy button-down shirt (no logos)",
+#                      "guest": "a plain black quarter-zip sweater (no logos)"},
+#     },
+#     {
+#         "id": "line_art",
+#         "poster": "a large framed minimalist single-line botanical line-art print in black ink on a cream "
+#                   "background — abstract lines only, NO words, no logos",
+#         "decor": "a matte black ceramic vase with dried pampas grass, a short stack of plain design books and "
+#                  "a small abstract brass sculpture",
+#         "wardrobe": {"host": "a plain slate-grey henley (no logos)",
+#                      "guest": "a plain dark olive crew-neck sweater (no logos)"},
+#     },
+#     {
+#         "id": "calm_typography",
+#         "poster": "a large framed minimalist poster showing a single common everyday word in clean white "
+#                   "uppercase sans-serif on a plain dark background — a generic ordinary word only, NOT a brand "
+#                   "name, slogan, quote, book title, song lyric or any recognizable phrase",
+#         "decor": "a potted fern, a plain ceramic mug, a small stack of unbranded notebooks and a smooth river "
+#                  "stone",
+#         "wardrobe": {"host": "a plain black crew-neck long-sleeve sweater (no logos)",
+#                      "guest": "a plain dark charcoal polo shirt (no logos or text)"},
+#     },
+# ]
+# _VARIATION_STATE = IDENTITY_CACHE_DIR / "variation_state.json"
+
+
+# def _profile_by_id(pid: str) -> dict | None:
+#     return next((p for p in _VARIATION_PROFILES if p["id"] == pid), None)
+
+
+# def _select_variation_profile() -> dict | None:
+#     """Pick the variation profile for THIS reel. 'auto' rotates to the next profile
+#     each render (so consecutive reels differ); a specific id pins one; 'none' or
+#     variation off returns None (→ the legacy single fixed look)."""
+#     s = get_settings()
+#     if not getattr(s, "vary_across_reels", True):
+#         return None
+#     choice = (getattr(s, "variation_profile", "auto") or "auto").strip().lower()
+#     if choice in ("none", "off", ""):
+#         return None
+#     if choice != "auto":
+#         return _profile_by_id(choice)  # pinned profile (or None if unknown)
+#     # auto-rotate via a small persistent counter
+#     n = 0
+#     try:
+#         n = int(json.loads(_VARIATION_STATE.read_text(encoding="utf-8")).get("n", 0))
+#     except Exception:  # noqa: BLE001
+#         n = 0
+#     profile = _VARIATION_PROFILES[n % len(_VARIATION_PROFILES)]
+#     try:
+#         _VARIATION_STATE.write_text(json.dumps({"n": n + 1}), encoding="utf-8")
+#     except Exception:  # noqa: BLE001
+#         pass
+#     return profile
+
+
+# def _studio_for_profile(profile: dict | None) -> str:
+#     """The full studio description used for IMAGE generation: fixed structure plus
+#     this reel's specific poster art and decor objects."""
+#     if not profile:
+#         return (_STUDIO_STRUCTURE + "; on the back wall, a large framed original abstract art print with NO "
+#                 "text or logos; stacked plain books, small plants and tasteful unbranded decor on the shelves")
+#     return (f"{_STUDIO_STRUCTURE}; on the back wall, {profile['poster']}; on and around the shelves, "
+#             f"{profile['decor']}")
+
+
+# # A FIXED studio reference used by the VIDEO prompts/enforcement. It is deliberately
+# # poster-agnostic: it defers to the per-reel identity image so a reel stays internally
+# # consistent (same poster/decor/wardrobe as that reel's locked image) without pinning
+# # one specific poster across all reels.
 # _FIXED_SET = (
-#     "SAME EXACT podcast studio set in every shot (do not vary it): a warm taupe-grey "
-#     "acoustic-panel back wall; on the wall behind, EXACTLY TWO framed black-and-white "
-#     "mountain-landscape photographs in thin matte-black frames, side by side; a single tall "
-#     "leafy potted monstera plant in the back-left corner; one black tripod floor lamp with a "
-#     "cream drum shade on the right giving soft warm light; a heavy dark walnut wood table in "
-#     "the foreground; a black dynamic microphone on a black boom arm. Cinematic warm amber key "
-#     "lighting. This identical set, wall art, plant, lamp and lighting must appear in every single "
-#     "shot so all scenes look like one continuous recording in one room."
+#     "SAME EXACT studio in every shot of this reel — " + _STUDIO_STRUCTURE + ". Keep the wall art/posters, the "
+#     "framed pieces, the objects on the shelves AND each person's clothing EXACTLY as they appear in the "
+#     "supplied reference image — do not invent different posters, different decor or different clothes. "
+#     "Everything matches the reference image so all scenes look like one continuous recording in the same room."
+# )
+
+# # Short canonical studio phrase for the (token-limited) director briefs.
+# _STUDIO_SHORT = (
+#     "the same fixed studio as the reference image — matte-black bookshelf/cabinet wall with warm LED accent "
+#     "lighting, mid-century grey upholstered armchairs, a black boom microphone, neutral rug, warm moody "
+#     "lighting; keep the SAME wall art, decor and clothing as the reference image"
+# )
+
+# # ── Fixed seating canon (viewer's perspective) ────────────
+# # The seating is a FACT of the real set and never changes between clips: the GUEST
+# # sits on the LEFT of frame, the HOST sits on the RIGHT. Everything directional
+# # (which way a speaker faces, where their eyes go) is DERIVED from this, so it is
+# # deterministic — never invented per scene. A person on the right looks LEFT toward
+# # the other; a person on the left looks RIGHT.
+# SEAT_SIDE = {"host": "right", "guest": "left"}
+
+# # Hard rule against Seedance burning ANY text into the picture. Seedance is
+# # Chinese-origin and will sometimes render subtitles/captions (often Chinese)
+# # unless explicitly forbidden; this is repeated in every video layer.
+# _NO_TEXT = (
+#     "ABSOLUTELY NO on-screen text of any kind anywhere in the frame: no captions, no subtitles, no closed "
+#     "captions, no burned-in words, no karaoke text, no lower-thirds, no titles, no name tags, no caption "
+#     "bar, no watermark, no logos, and no Chinese or English characters rendered into the video. The frame "
+#     "shows ONLY the filmed scene — clean image, zero graphics or text overlays."
+# )
+
+# # Hard rule against rendering anyone's intellectual property. Real generative
+# # platforms (Higgsfield included) refuse a job with "IP detected" if the prompt or
+# # the reference image contains a brand logo, trademark, real book/album title,
+# # slogan or recognizable copyrighted artwork. Since WE produce the image that is fed
+# # to the video step, we forbid IP at the source.
+# _NO_IP = (
+#     "Do NOT depict any brand logos, trademarks, company names, sports/team marks, real book, album or movie "
+#     "titles, advertising slogans, song lyrics, famous quotes, or any recognizable copyrighted artwork or "
+#     "character — anywhere in the frame, including on clothing, posters, wall art, mugs, books, screens or "
+#     "props. Use only generic, original, unbranded designs; any clothing must be plain with no visible logos "
+#     "or text."
 # )
 
 
+# def _other_dir(side: str) -> str:
+#     """The direction someone on `side` must look to face the other person."""
+#     return "left" if side == "right" else "right"
+
+
+# def _seat_phrase(role: str) -> str:
+#     """e.g. 'seated on the RIGHT side of the frame (the host's fixed seat)'."""
+#     side = SEAT_SIDE.get(role, "right")
+#     return f"seated on the {side.upper()} side of the frame (the {role}'s fixed seat)"
+
+
+# def _eyeline_phrase(speaker: str, listener: str) -> str:
+#     """Deterministic eye-line: the speaker turns toward the listener's fixed side."""
+#     s_side = SEAT_SIDE.get(speaker, "right")
+#     look = _other_dir(s_side)                       # direction to face the other person
+#     l_side = SEAT_SIDE.get(listener, _other_dir(s_side))
+#     return (f"the {speaker} is {_seat_phrase(speaker)} and turns to look toward their {look} "
+#             f"(screen-{look}), where the {listener} sits ({l_side} of frame), NOT into the camera")
+
+
 # # ── Prompt building ───────────────────────────────────────
-# def _identity_image_prompt(role: str, studio: str) -> str:
+# def _wardrobe_for(profile: dict | None, role: str) -> str | None:
+#     if not profile:
+#         return None
+#     return (profile.get("wardrobe") or {}).get(role)
+
+
+# def _identity_image_prompt(role: str, studio: str, profile: dict | None = None) -> str:
+#     set_desc = _studio_for_profile(profile)
+#     if role == "both":
+#         wh = _wardrobe_for(profile, "host")
+#         wg = _wardrobe_for(profile, "guest")
+#         clothes = (f" Dress the HOST in {wh} and the GUEST in {wg}, but keep BOTH people's faces, hair, "
+#                    f"beards and build EXACTLY as in the reference photo." if (wh and wg) else
+#                    " Keep BOTH people's faces, hair, beards, build and their black/dark clothing exactly as shown.")
+#         return (
+#             f"The TWO exact people from the reference photo together as podcast co-hosts, seated SIDE BY SIDE "
+#             f"in two separate mid-century grey upholstered armchairs angled slightly toward each other — the "
+#             f"GUEST on the LEFT of frame, the HOST on the RIGHT (viewer's perspective) — both fully visible in "
+#             f"one balanced two-shot. {set_desc}. A black dynamic microphone on a black boom arm reaches in "
+#             f"toward each of them from the side, NO headphones (in-person conversation), relaxed natural "
+#             f"posture, mid-conversation.{clothes} Do not swap or merge their identities. Wide-to-medium "
+#             f"vertical 9:16 two-shot, photographic and lifelike (natural skin texture, visible pores, "
+#             f"catchlights), warm moody low-key lighting, true-to-life colour, sharp focus. No on-screen text, "
+#             f"no watermark, no logos, NOT a 3D render, NOT illustration, NOT anime. " + _NO_IP
+#         )
 #     label = "HOST" if role == "host" else "GUEST"
+#     w = _wardrobe_for(profile, role)
+#     clothes = (f"Keep the person's face, hair, beard and build EXACTLY as in the reference photo, but dress "
+#                f"them in {w} (their clothing for this episode)." if w else
+#                "Keep the person's face, hair, beard, build and their black/dark clothing exactly as in the "
+#                "reference photo.")
 #     return (
-#         f"This exact person as a podcast {label}, seated at a desk in a podcast studio, "
-#         f"framed as a TIGHT SINGLE-PERSON SHOT — ONLY this one person is visible in frame, "
-#         f"NO other people, no second person, no one sitting opposite, the chair across the desk is empty/out of frame. "
-#         f"{_FIXED_SET} A black dynamic microphone on a boom arm in front of them, "
-#         f"NO headphones (this is an in-person conversation), body angled slightly as if facing "
-#         f"someone across the desk (off-camera), hands resting naturally. Keep the person's "
-#         f"face, hair, and likeness exactly as in the reference photo. Medium close-up single shot, "
-#         f"vertical 9:16 composition. "
-#         f"ULTRA-PHOTOREALISTIC: looks like a real photograph of a real human shot on a professional "
-#         f"cinema camera with a 50mm lens and shallow depth of field; lifelike skin with natural texture, "
-#         f"visible pores and subtle subsurface tones (never airbrushed, plastic or waxy); catchlights in the "
-#         f"eyes; soft, natural cinematic warm lighting; true-to-life colour. Sharp focus, no text, no watermark, "
-#         f"no logos, NOT a 3D render, NOT illustration, NOT anime/cartoon."
+#         f"Faithfully reproduce this exact person as a podcast {label}, seated in a mid-century grey "
+#         f"upholstered armchair with a wooden frame, framed as a SINGLE-PERSON SHOT — ONLY this one person is "
+#         f"visible in frame, no second person, no one sitting opposite. {set_desc}. A black dynamic microphone "
+#         f"on a black boom arm reaches in from the side, NO headphones (this is an in-person conversation). The "
+#         f"person is {_seat_phrase(role)}, body and gaze turned toward their "
+#         f"{_other_dir(SEAT_SIDE.get(role, 'right'))} (screen-{_other_dir(SEAT_SIDE.get(role, 'right'))}) where "
+#         f"the other person sits off-camera, hands resting naturally. {clothes} Looking toward the other person "
+#         f"off-camera (not into the lens). Vertical 9:16 composition. "
+#         f"PHOTOREALISTIC like a real photograph of a real human shot on a cinema camera with a 50mm lens and "
+#         f"shallow depth of field; lifelike skin with natural texture, visible pores and subtle subsurface "
+#         f"tones (never airbrushed, plastic or waxy); catchlights in the eyes; warm moody studio lighting; "
+#         f"true-to-life colour. Sharp focus, no text, no watermark, "
+#         f"no logos, NOT a 3D render, NOT illustration, NOT anime/cartoon. " + _NO_IP
 #     )
 
 
@@ -241,8 +441,8 @@
 #     listener = listener_role.lower()
 #     cam = _sanitize_camera(scene.camera_movement)
 #     body = (scene.body_language or "").strip()
-#     eyes = (scene.eye_contact or "looking naturally at the other person across the desk, "
-#             "with occasional brief glances down to the desk or microphone in thought").strip()
+#     eyes = (scene.eye_contact or "natural engaged expression, with occasional brief glances down "
+#             "or to the microphone in thought").strip()
 #     tone = (scene.emotional_tone or "").strip()
 #     humor = (scene.humor or "").strip()
 #     cue = (scene.reaction_cue or "listening intently and nodding slowly, attentive and engaged").strip()
@@ -271,28 +471,28 @@
 #     if humor:
 #         parts.append(f"Subtle, natural touch (only if it fits the moment): {humor}.")
 #     parts.append(
-#         f"Eye contact: {eyes}. This is a real face-to-face conversation — the {speaker} looks mostly at the "
-#         f"OTHER person across the desk, NOT into the camera (no fixed camera stare)."
+#         f"Position & eye contact: {_eyeline_phrase(speaker, listener)}. {eyes}. "
+#         f"This is a real in-person conversation — no fixed camera stare."
 #     )
 
 #     if want_reaction:
 #         parts.append(
 #             f"REACTION BEAT (still single-person — no two-shot): for a brief moment, about 1 to 2 seconds in "
-#             f"the middle of the clip, cut to the {listener} ALONE in frame (use the SECOND reference image) — "
+#             f"the middle of the clip, cut to the {listener} ALONE in frame (use the SECOND reference image), "
+#             f"{_seat_phrase(listener)}, looking toward their {_other_dir(SEAT_SIDE.get(listener, 'left'))} "
+#             f"(screen-{_other_dir(SEAT_SIDE.get(listener, 'left'))}) where the {speaker} sits off-camera — "
 #             f"{cue}; mouth closed, NOT speaking, just a natural listening reaction such as a slow nod or a small "
 #             f"empathetic look — then cut back to the {speaker} speaking. The audio keeps playing throughout (it is "
 #             f"the {speaker}'s voice); the {listener} never talks. Even during this brief cut, only ONE person is on "
-#             f"screen, and it is the same studio, same desk, same lighting."
+#             f"screen, and it is the same studio and lighting."
 #         )
 
 #     # Identity + set lock
 #     parts.append(
-#         f"Preserve each person's exact face, hair, beard, skin tone and clothing from their own reference image "
-#         f"with zero identity changes. No headphones (they sit face to face). Keep the EXACT same podcast studio "
-#         f"from the reference images: the warm taupe-grey acoustic-panel wall with two framed black-and-white "
-#         f"mountain photographs side by side, the tall monstera plant, the tripod floor lamp with a cream shade, "
-#         f"the dark walnut table, the black boom microphone and the warm amber lighting. Do not change the room, "
-#         f"the wall art, the props or the lighting."
+#         f"Preserve each person's exact face, hair, beard, skin tone and their black/dark clothing from their own "
+#         f"reference image with zero identity changes. No headphones. They sit in mid-century grey upholstered "
+#         f"armchairs. " + _FIXED_SET + " Do not change the room, the cabinetry, the books, the posters, the decor "
+#         f"or the lighting."
 #     )
 #     # Realism
 #     parts.append(
@@ -304,10 +504,192 @@
 #     # Negative guidance
 #     parts.append(
 #         f"Negative: do NOT change the people, do NOT change the location; no two people in one frame, no second "
-#         f"person in the background, no headphones, no on-screen text, no captions, no logos, no cartoon/anime/3D-"
-#         f"render look, no plastic or waxy skin, no fixed camera stare."
+#         f"person in the background, no headphones, no cartoon/anime/3D-render look, no plastic or waxy skin, no "
+#         f"fixed camera stare. " + _NO_TEXT + " " + _NO_IP
 #     )
 #     return " ".join(parts)
+
+
+# # ── Director-skill briefs + enforcement suffixes ──────────
+# # The uploaded skills (loaded as SYSTEM prompts) do the *creative* prompt
+# # writing; these briefs frame our exact use case for the skill, and the
+# # enforcement suffixes lock the non-negotiable technical contract on top
+# # (identity, fixed studio, single-person framing, no headphones, lip-sync).
+# # They deliberately reuse the same canon (_FIXED_SET) and constraint language as
+# # the built-in fallback prompts so directed and fallback prompts stay aligned.
+# def _image_concept_brief(role: str, studio: str, profile: dict | None = None) -> str:
+#     set_desc = _studio_for_profile(profile)
+#     if role == "both":
+#         wh, wg = _wardrobe_for(profile, "host"), _wardrobe_for(profile, "guest")
+#         wear = (f" Dress the host in {wh} and the guest in {wg}, faces unchanged from the reference."
+#                 if (wh and wg) else " Same wardrobe and faces as the reference photo.")
+#         return (
+#             f"An editorial two-shot photograph of TWO real podcast co-hosts seated SIDE BY SIDE in two "
+#             f"separate mid-century grey upholstered armchairs angled slightly toward each other — GUEST on the "
+#             f"LEFT of frame, HOST on the RIGHT (viewer perspective) — a black boom microphone reaching in "
+#             f"toward each from the side, relaxed and mid-conversation. Both people fully visible in one "
+#             f"balanced frame. Vertical 9:16. Keep BOTH faces exactly from the reference photo.{wear} Aim for a "
+#             f"believable real-photograph look (film/editorial, not glossy CGI). Studio: {set_desc}"
+#         )
+#     who = "podcast host" if role == "host" else "podcast guest"
+#     w = _wardrobe_for(profile, role)
+#     wear = (f" Dress them in {w}; keep the face/hair/beard exactly from the reference photo."
+#             if w else " Same face and black/dark wardrobe as the reference photo.")
+#     return (
+#         f"Single editorial portrait of one real {who} seated in a mid-century grey upholstered armchair in a "
+#         f"warm in-person podcast studio, a black boom microphone reaching in from the side, body relaxed and "
+#         f"angled slightly toward the other person off to the side (off-camera), looking off to the side (not at "
+#         f"the lens). One person only in frame. Vertical 9:16. Keep the face exactly from the reference "
+#         f"photo.{wear} Aim for a believable real-photograph look (film/editorial, not glossy CGI). "
+#         f"Studio: {set_desc}"
+#     )
+
+
+# def _image_enforcement(role: str, profile: dict | None = None) -> str:
+#     set_desc = _studio_for_profile(profile)
+#     if role == "both":
+#         wh, wg = _wardrobe_for(profile, "host"), _wardrobe_for(profile, "guest")
+#         wear = (f" Dress the HOST in {wh} and the GUEST in {wg}; keep BOTH faces, hair, beards and build "
+#                 f"EXACTLY from the reference photo." if (wh and wg)
+#                 else " Keep BOTH people's faces, hair, beards, build and clothing EXACTLY from the reference.")
+#         return (
+#             "NON-NEGOTIABLE CONSTRAINTS (override anything above that conflicts): Studio = " + set_desc + "." +
+#             wear + " Do not swap, merge or invent identities. A balanced TWO-SHOT: both people fully visible, "
+#             "seated SIDE BY SIDE in separate grey armchairs angled slightly toward each other — the GUEST on "
+#             "the LEFT of frame and the HOST on the RIGHT (viewer perspective). NO headphones. Vertical 9:16. "
+#             "No on-screen text, no captions, no watermark, no logos. Render as a real photograph (natural skin "
+#             "texture, visible pores, catchlights), NOT a 3D render, NOT illustration, NOT anime. " + _NO_IP
+#         )
+#     w = _wardrobe_for(profile, role)
+#     wear = (f" Dress the person in {w}, but keep their face, hair, beard and build EXACTLY from the supplied "
+#             f"reference image — zero identity changes." if w
+#             else " Keep the person's face, hair, beard, build and black/dark clothing EXACTLY from the "
+#                  "supplied reference image — zero identity changes.")
+#     return (
+#         "NON-NEGOTIABLE CONSTRAINTS (override anything above that conflicts): Studio = " + set_desc + "." +
+#         wear + " SINGLE-PERSON SHOT: only this one person is visible, no second person, no one sitting "
+#         "opposite. They sit in a mid-century grey upholstered armchair. NO headphones. Vertical 9:16. No "
+#         "on-screen text, no captions, no watermark, no logos. Render as a real photograph (natural skin "
+#         "texture, visible pores, catchlights), NOT a 3D render, NOT illustration, NOT anime. " + _NO_IP
+#     )
+
+
+# def _video_concept_brief(scene: Scene, speaker: str, listener: str,
+#                          want_reaction: bool, duration: int, cam: str) -> str:
+#     bits = [
+#         f"A calm, friendly IN-PERSON podcast conversation clip, about {duration}s, vertical 9:16, single "
+#         f"camera, minimal cuts. The {speaker} is the on-camera speaker; the {listener} is the other "
+#         f"participant (off-camera). {_eyeline_phrase(speaker, listener)}. This is a relaxed studio chat — not action, not a "
+#         f"confrontation.",
+#         f"The {speaker}'s spoken audio is SUPPLIED separately — do NOT write any dialogue, narration or "
+#         f"subtitles; only describe the visible performance that lip-syncs to that audio. Render a CLEAN frame with NO on-screen text, captions or subtitles burned into the picture.",
+#         f"What the {speaker} does on this line: {scene.character_action}.",
+#         f"Facial expression: {scene.facial_expression}.",
+#     ]
+#     if (scene.body_language or "").strip():
+#         bits.append(f"Body language: {scene.body_language}.")
+#     if (scene.emotional_tone or "").strip():
+#         bits.append(f"Emotional tone: {scene.emotional_tone}.")
+#     if (scene.humor or "").strip():
+#         bits.append(f"Light optional touch (only if it fits): {scene.humor}.")
+#     eyes = (scene.eye_contact or "natural engaged expression, brief glances down in thought").strip()
+#     bits.append(f"Eye-line: {eyes} (not staring at the camera).")
+#     bits.append(f"Camera: {cam}.")
+#     if want_reaction:
+#         cue = (scene.reaction_cue or "nods slowly, listening, attentive").strip()
+#         bits.append(
+#             f"Include ONE brief (~1-2s) cut to the {listener} ALONE reacting ({cue}, not speaking), then "
+#             f"back to the {speaker}. Never both people in one frame."
+#         )
+#     else:
+#         bits.append("Single continuous take, no cuts.")
+#     bits.append(f"Studio: {_STUDIO_SHORT}.")
+#     return " ".join(bits)
+
+
+# def _video_enforcement(scene: Scene, speaker: str, listener: str, want_reaction: bool) -> str:
+#     parts = [
+#         "NON-NEGOTIABLE TECHNICAL CONTRACT (override anything above that conflicts):",
+#         f"Only ONE person is ever visible at any instant — tight single-person vertical shot. NEVER show "
+#         f"both people in the same frame; no two-shot, no split-screen, no second person in the background.",
+#         f"The {speaker} is the primary subject (FIRST reference image). The mouth movements must EXACTLY "
+#         f"lip-sync to the PROVIDED audio track — say only what the audio says, never invent or mouth words "
+#         f"not in the audio. Do NOT add any spoken dialogue, narration, subtitles or an Audio section; the "
+#         f"audio is supplied separately.",
+#         f"FIXED SEATING (viewer's perspective, identical in every clip): the GUEST sits on the LEFT of the "
+#         f"frame, the HOST sits on the RIGHT. The on-camera {speaker} is therefore {_seat_phrase(speaker)} and "
+#         f"must face/lean toward their {_other_dir(SEAT_SIDE.get(speaker, 'right'))} (screen-"
+#         f"{_other_dir(SEAT_SIDE.get(speaker, 'right'))}) toward the off-camera {listener} — never the wrong way, "
+#         f"never straight into the lens.",
+#     ]
+#     if want_reaction:
+#         parts.append(
+#             f"The ONE permitted cut is a brief ~1-2s glimpse of the {listener} ALONE (SECOND reference "
+#             f"image) listening/reacting with mouth closed, then back to the {speaker}; otherwise a single "
+#             f"continuous take. Even during this cut, only one person is on screen."
+#         )
+#     else:
+#         parts.append("Single continuous take, no hard cuts.")
+#     parts.append(
+#         "Preserve each person's exact face, hair, beard, skin tone and clothing from their OWN reference "
+#         "image, zero identity changes. NO headphones (they sit face to face). " + _FIXED_SET +
+#         " Ultra-real human look: natural skin texture and pores, catchlights, realistic blinking and "
+#         "micro-expressions; not plastic, waxy, cartoon, anime or 3D-render; no fixed camera stare. " + _NO_TEXT
+#         + " " + _NO_IP
+#     )
+#     return " ".join(parts)
+
+
+# def _two_shot_video_prompt(scene: Scene, studio: str, speaker: str, listener: str) -> str:
+#     """Built-in fallback prompt for the ESTABLISHING two-shot: both people visible
+#     in one frame, the speaker lip-syncing to the supplied audio while the other
+#     listens. This is the ONE clip in the reel where two people share the frame."""
+#     spk = speaker.lower()
+#     lis = listener.lower()
+#     return (
+#         f"A photorealistic establishing TWO-SHOT of an in-person podcast: BOTH the {spk} and the {lis} are "
+#         f"visible together in one frame, seated SIDE BY SIDE in two separate mid-century grey upholstered "
+#         f"armchairs angled slightly toward each other — the GUEST on the LEFT of frame, the HOST on the RIGHT "
+#         f"(viewer perspective) — in the studio. "
+#         f"This is a wide-to-medium vertical 9:16 two-shot that establishes the scene. The {spk} is speaking "
+#         f"into the microphone — the {spk}'s mouth movements must lip-sync to the provided audio track (say "
+#         f"only what the audio says, never invent words); the {lis} listens and gives small natural nods. "
+#         f"{scene.character_action}. Keep BOTH people's exact faces, hair, beards, skin tone and clothing from "
+#         f"the reference images with zero identity changes — the {spk} from one reference and the {lis} from "
+#         f"the other; do not swap or merge them. No headphones (in-person). " + _FIXED_SET + " Camera: slow gentle "
+#         f"push-in, single continuous take. Ultra-real human look: natural skin texture and pores, "
+#         f"catchlights, realistic blinking and micro-expressions; not plastic, waxy, cartoon, anime or "
+#         f"3D-render. " + _NO_TEXT
+#     )
+
+
+# def _two_shot_concept_brief(scene: Scene, speaker: str, listener: str, duration: int, cam: str) -> str:
+#     return (
+#         f"An establishing TWO-SHOT for an in-person podcast, about {duration}s, vertical 9:16. BOTH people "
+#         f"are visible together in one frame, seated SIDE BY SIDE in separate grey armchairs angled toward each other: the {speaker} is "
+#         f"speaking, the {listener} is listening and nodding. This opening shot establishes the room and the "
+#         f"pair before the conversation cuts to single talking heads. The {speaker}'s spoken audio is SUPPLIED "
+#         f"separately — do NOT write dialogue; only describe the visible performance lip-syncing to it. Keep the frame CLEAN — no captions, subtitles or on-screen text. "
+#         f"What the {speaker} does: {scene.character_action}. Camera: {cam}. Keep it a calm studio chat, not "
+#         f"action. Studio: {_STUDIO_SHORT}."
+#     )
+
+
+# def _two_shot_enforcement(scene: Scene, speaker: str, listener: str) -> str:
+#     return (
+#         "NON-NEGOTIABLE TECHNICAL CONTRACT (override anything above that conflicts): This is the ONE "
+#         "establishing two-shot — BOTH people are intentionally visible together in one balanced frame, "
+#         "seated SIDE BY SIDE in separate grey armchairs angled toward each other — the GUEST on the LEFT of "
+#         "frame and the HOST on the RIGHT (viewer perspective). Do NOT add extra people. " +
+#         f"The {speaker} is the speaker and lip-syncs EXACTLY to the PROVIDED audio (say only what the audio "
+#         f"says, never invent or mouth words; no added dialogue, narration, subtitles or Audio section); the "
+#         f"{listener} listens with mouth closed and small natural nods. Preserve BOTH identities exactly from "
+#         f"their reference images — the {speaker} from one, the {listener} from the other; never swap or merge "
+#         f"faces. NO headphones. " + _FIXED_SET +
+#         " Single continuous take, gentle push-in. Ultra-real human look: natural skin texture and pores, "
+#         "catchlights, realistic blinking and micro-expressions; not plastic, waxy, cartoon, anime or "
+#         "3D-render. " + _NO_TEXT
+#     )
 
 
 # def _is_static_camera(camera_movement: str) -> bool:
@@ -428,33 +810,65 @@
 #         studio = canon["studio"]
 #         (base_dir / "visual_canon.json").write_text(json.dumps(canon, indent=2), encoding="utf-8")
 
+#         # Per-reel VARIATION PROFILE: chosen once for the whole reel so every scene in
+#         # this reel shares one look (same poster art, decor and wardrobe), while the
+#         # NEXT reel rotates to a different look. Faces always come from the real photo.
+#         reel_profile = _select_variation_profile()
+#         job["variation_profile"] = (reel_profile or {}).get("id", "default")
+#         if reel_profile:
+#             _update(job, step=(f"This reel's look: '{reel_profile['id']}' — "
+#                                f"{reel_profile['poster'][:60]}... (consistent across this reel)"))
+
 #         use_mcp = s.video_provider.lower() == "hf_mcp"
 #         mcp_client = higgsfield_mcp.HiggsfieldMCP(job=job) if use_mcp else None
 
 #         # 2 · identity images — one locked frame per character
+#         # First, AUTO-NORMALIZE the raw reference photos: accept host/guest/both in
+#         # ANY format (jpg/jpeg/png/webp/heic/...), fix EXIF rotation, flatten alpha,
+#         # and write a single clean <role>.png. This runs every job (idempotent, cheap)
+#         # so you never have to run a separate prepare step by hand.
+#         if use_mcp:
+#             norm = image_prep.normalize_inputs(ASSETS_DIR)
+#             for line in norm["results"]:
+#                 _update(job, step=f"Input photo — {line}")
 #         host_photo, guest_photo = _character_path("host"), _character_path("guest")
 #         identity_urls: dict[str, str] = {}
 #         identity_refs: dict[str, str] = {}
 
 #         if use_mcp:
 #             import shutil
-#             photos = {"host": host_photo, "guest": guest_photo}
-#             for role in ("host", "guest"):
+#             both_photo = _character_path("both")
+#             photos = {"host": host_photo, "guest": guest_photo, "both": both_photo}
+#             # host + guest are the on-camera talking heads. 'both' is generated ONLY to
+#             # be used as the reel THUMBNAIL (it is never shown as a video scene), and
+#             # only when we have a both-photo or a locked/cached 'both' image to make it.
+#             roles = ["host", "guest"]
+#             if get_settings().establishing_two_shot:
+#                 _pk = reel_profile["id"] if reel_profile else ""
+#                 if both_photo or _identity_cache_load("both", "", key=_pk) or (IDENTITY_CACHE_DIR / f"{_cache_stem('both', _pk)}.png").exists():
+#                     roles.append("both")
+#                 else:
+#                     _update(job, step=("No 'both' image available (assets/characters/both.*) — the reel will "
+#                                        "render normally; the thumbnail will fall back to the host image."))
+#             for role in roles:
 #                 photo = photos[role]
 #                 # 1) Locked/cached identity is self-sufficient — reuse it even if
-#                 #    the original reference photo is no longer on disk.
-#                 sig = _identity_signature(photo, studio, "gpt_image_2") if photo else None
+#                 #    the original reference photo is no longer on disk. Cache is keyed
+#                 #    by the per-reel variation profile, so a NEW look regenerates while
+#                 #    a repeated look reuses (generate-once-per-look).
+#                 pkey = reel_profile["id"] if reel_profile else ""
+#                 studio_for_sig = _studio_for_profile(reel_profile)
+#                 sig = _identity_signature(photo, studio_for_sig, "gpt_image_2") if photo else None
 #                 cached = None
 #                 if not job.get("force_regen_identity"):
-#                     # locked entries match regardless of signature; non-locked need sig
-#                     cached = _identity_cache_load(role, sig if sig else "")
+#                     cached = _identity_cache_load(role, sig if sig else "", key=pkey)
 #                     if not cached and sig:
-#                         cached = _identity_cache_load(role, sig)
+#                         cached = _identity_cache_load(role, sig, key=pkey)
 #                 if cached:
-#                     _update(job, step=f"Reusing cached {role} identity image (0 credits)")
+#                     _update(job, step=f"Reusing cached {role} identity image for this look (0 credits)")
 #                     identity_urls[role] = cached["url"]
 #                     identity_refs[role] = cached["ref"]
-#                     cpng = IDENTITY_CACHE_DIR / f"{role}.png"
+#                     cpng = IDENTITY_CACHE_DIR / f"{_cache_stem(role, pkey)}.png"
 #                     if cpng.exists():
 #                         shutil.copyfile(cpng, img_dir / f"{role}.png")
 #                     continue
@@ -464,11 +878,24 @@
 #                     raise RuntimeError(
 #                         f"No locked/cached identity for {role} and no reference photo at "
 #                         f"assets/characters/{role}.*. Add the photo or lock an image first.")
-#                 _update(job, step=f"Generating {role} identity image (first time for this photo/studio)")
+#                 _update(job, step=f"Generating {role} identity image (look: {pkey or 'default'})")
+#                 # The gpt-image-2 director skill writes the creative prompt; our
+#                 # enforcement suffix locks identity + studio + single-person + no
+#                 # headphones. Falls back to the built-in prompt if the skill is off
+#                 # or its LLM call returns nothing.
+#                 img_prompt = None
+#                 if get_settings().use_director_skills:
+#                     img_prompt = await director_skills.image_prompt(
+#                         _image_concept_brief(role, studio, reel_profile),
+#                         _image_enforcement(role, reel_profile))
+#                     if img_prompt:
+#                         _update(job, step=f"{role}: prompt written by gpt-image-2 director skill")
+#                 if not img_prompt:
+#                     img_prompt = (_identity_image_prompt(role, studio, reel_profile) +
+#                                   " Keep the person's face, hair and likeness exactly as in the reference image.")
 #                 gen = await mcp_client.generate(
 #                     "image",
-#                     prompt=_identity_image_prompt(role, studio) +
-#                            " Keep the person's face, hair and likeness exactly as in the reference image.",
+#                     prompt=img_prompt,
 #                     model_hint="gpt_image_2",
 #                     image_files=[photo],
 #                     aspect_ratio=s.hf_aspect_ratio,
@@ -478,18 +905,14 @@
 #                 dest = img_dir / f"{role}.png"
 #                 await _download(gen["url"], dest)
 
-#                 # AUTO-LOCK: persist the generated studio image as the permanent
-#                 # identity so it is NEVER generated or re-uploaded again. We copy
-#                 # the PNG into the identity_cache and register it once to get a
-#                 # durable, reusable media ref (exactly what lock_character_image.py
-#                 # does, but automatic). Every future scene/run reuses this ref —
-#                 # zero generation, zero media_upload of the raw photo.
+#                 # AUTO-LOCK this look: persist under (role, profile) so this exact
+#                 # look is never regenerated; a different reel/profile makes its own.
 #                 import shutil as _sh
-#                 cache_png = IDENTITY_CACHE_DIR / f"{role}.png"
+#                 cache_png = IDENTITY_CACHE_DIR / f"{_cache_stem(role, pkey)}.png"
 #                 _sh.copyfile(dest, cache_png)
 #                 locked_ref = gen.get("ref")
 #                 try:
-#                     _update(job, step=f"Locking {role} identity image (one-time, reused free afterwards)")
+#                     _update(job, step=f"Locking {role} identity image for this look (reused free afterwards)")
 #                     reg = await mcp_client.register_local_image(cache_png)
 #                     if reg.get("ref"):
 #                         locked_ref = reg["ref"]
@@ -497,8 +920,8 @@
 #                     logger.warning("auto-lock register failed for %s (using gen ref): %s", role, e)
 #                 identity_refs[role] = locked_ref
 #                 if locked_ref:
-#                     _identity_cache_save(role, sig, gen["url"], locked_ref, cache_png, locked=True)
-#                     _update(job, step=f"{role.title()} identity locked — future reels reuse it for 0 credits")
+#                     _identity_cache_save(role, sig, gen["url"], locked_ref, cache_png, locked=True, key=pkey)
+#                     _update(job, step=f"{role.title()} identity locked for look '{pkey or 'default'}'")
 #         elif host_photo and guest_photo:
 #             for role, photo in (("host", host_photo), ("guest", guest_photo)):
 #                 _update(job, step=f"Uploading {role} reference photo")
@@ -540,6 +963,12 @@
 #         prev_role: str | None = None
 #         scene_files: list[Path] = []
 #         force_regen = job.get("force_regen_scenes", False)
+
+#         # The two-shot of BOTH people is NO LONGER rendered as a video scene — every
+#         # clip in the reel is a single talking head. The 'both' image is still produced
+#         # (above), but only to serve as the reel THUMBNAIL (created after the merge).
+#         two_shot_scene_number: int | None = None
+
 #         for scene in scenes_to_do:
 #             seg = seg_by_index.get(scene.scene_number)
 #             target_sec = float(seg["duration"]) if seg else (scene.end_second - scene.start_second)
@@ -576,45 +1005,106 @@
 #                 speaker_role = role
 #                 listener_role = "guest" if speaker_role == "host" else "host"
 
-#                 # BOTH identity images go into EVERY clip: the speaker first (primary
-#                 # subject / start_image, lip-syncs to the audio) and the listener
-#                 # second (secondary reference, available for a brief in-clip reaction
-#                 # cut). Locked refs are reused directly — no re-upload, no quality
-#                 # loss, and NO last-frame chaining. If a ref is missing for a role we
-#                 # fall back to that role's local PNG.
-#                 ordered_refs: list[str] = []
-#                 ordered_files: list[Path] = []
-#                 for r_role in (speaker_role, listener_role):
-#                     r_ref = identity_refs.get(r_role)
-#                     r_img = img_dir / f"{r_role}.png"
-#                     if r_ref:
-#                         ordered_refs.append(r_ref)
-#                     elif r_img.exists():
-#                         ordered_files.append(r_img)
-#                 image_refs_arg = ordered_refs or None
-#                 image_files_arg = ordered_files or None
+#                 # ESTABLISHING TWO-SHOT: the FIRST clip opens on both people in one
+#                 # frame (over the opening line's audio), then the reel cuts to single
+#                 # talking heads. This is the only clip where two people share frame.
+#                 # This scene is the two-shot only if it's the one chosen above
+#                 # (default: a single middle scene). Everything else is single-person.
+#                 both_ref = identity_refs.get("both")
+#                 both_img = img_dir / "both.png"
+#                 two_shot = bool(two_shot_scene_number is not None
+#                                 and scene.scene_number == two_shot_scene_number
+#                                 and (both_ref or both_img.exists()))
 
-#                 # Ask for a brief in-clip reaction glimpse of the listener only when
-#                 # the turn is long enough to warrant a cutaway (config-gated).
-#                 react_threshold = get_settings().reaction_min_seconds
-#                 want_reaction = bool(
-#                     get_settings().reaction_shots_enabled and react_threshold
-#                     and target_sec >= react_threshold
-#                 )
+#                 if two_shot:
+#                     # Primary = the composed 'both' image; the two singles ride along
+#                     # as secondary identity anchors so each face stays exact.
+#                     ordered_refs, ordered_files = [], []
+#                     for r_role, r_img in (("both", both_img),
+#                                           (speaker_role, img_dir / f"{speaker_role}.png"),
+#                                           (listener_role, img_dir / f"{listener_role}.png")):
+#                         r_ref = identity_refs.get(r_role)
+#                         if r_ref:
+#                             ordered_refs.append(r_ref)
+#                         elif r_img.exists():
+#                             ordered_files.append(r_img)
+#                     image_refs_arg = ordered_refs or None
+#                     image_files_arg = ordered_files or None
+#                     want_reaction = False
+#                     cam = (scene.camera_movement or "slow push-in").strip()  # NOT sanitized: two-shot is intended here
+#                     _update(job, step=f"Scene {scene.scene_number}: ESTABLISHING TWO-SHOT (both on camera)")
+#                     vid_prompt = None
+#                     if get_settings().use_director_skills:
+#                         vid_prompt = await director_skills.video_prompt(
+#                             _two_shot_concept_brief(scene, speaker_role, listener_role, duration, cam),
+#                             _two_shot_enforcement(scene, speaker_role, listener_role),
+#                             bilingual=get_settings().seedance_bilingual_prompt,
+#                         )
+#                         if vid_prompt:
+#                             _update(job, step=f"Scene {scene.scene_number}: two-shot prompt written by seedance director skill")
+#                     if not vid_prompt:
+#                         vid_prompt = _two_shot_video_prompt(scene, studio, speaker_role, listener_role)
+#                 else:
+#                     # BOTH identity images go into EVERY single-person clip: the
+#                     # speaker first (primary subject / start_image, lip-syncs to the
+#                     # audio) and the listener second (secondary reference, available
+#                     # for a brief in-clip reaction cut). Locked refs are reused
+#                     # directly — no re-upload, no quality loss, no last-frame
+#                     # chaining. If a ref is missing we fall back to the local PNG.
+#                     ordered_refs, ordered_files = [], []
+#                     for r_role in (speaker_role, listener_role):
+#                         r_ref = identity_refs.get(r_role)
+#                         r_img = img_dir / f"{r_role}.png"
+#                         if r_ref:
+#                             ordered_refs.append(r_ref)
+#                         elif r_img.exists():
+#                             ordered_files.append(r_img)
+#                     image_refs_arg = ordered_refs or None
+#                     image_files_arg = ordered_files or None
 
-#                 _update(job, step=(f"Scene {scene.scene_number}: single clip from clean locked "
-#                                    f"image(s) (full quality"
-#                                    f"{', with listener reaction beat' if want_reaction else ''})"))
+#                     # Ask for a brief in-clip reaction glimpse of the listener only
+#                     # when the turn is long enough to warrant a cutaway (config-gated).
+#                     react_threshold = get_settings().reaction_min_seconds
+#                     want_reaction = bool(
+#                         get_settings().reaction_shots_enabled and react_threshold
+#                         and target_sec >= react_threshold
+#                     )
+
+#                     _update(job, step=(f"Scene {scene.scene_number}: single talking head (full quality"
+#                                        f"{', with listener reaction beat' if want_reaction else ''})"))
+#                     cam = _sanitize_camera(scene.camera_movement)
+#                     # The seedance director skill writes the creative prompt; our
+#                     # enforcement suffix locks single-person framing + precise
+#                     # lip-sync + identity + studio + the one reaction beat. Falls
+#                     # back to the built-in prompt if the skill is off or returns
+#                     # nothing, so a flaky prompt step never blocks a paid render.
+#                     vid_prompt = None
+#                     if get_settings().use_director_skills:
+#                         vid_prompt = await director_skills.video_prompt(
+#                             _video_concept_brief(scene, speaker_role, listener_role, want_reaction, duration, cam),
+#                             _video_enforcement(scene, speaker_role, listener_role, want_reaction),
+#                             bilingual=get_settings().seedance_bilingual_prompt,
+#                         )
+#                         if vid_prompt:
+#                             _update(job, step=f"Scene {scene.scene_number}: prompt written by seedance director skill")
+#                     if not vid_prompt:
+#                         vid_prompt = _scene_video_prompt(scene, studio, speaker_role, listener_role, want_reaction)
+
+#                 # Persist the exact prompt used, for inspection and reproducible retries.
+#                 try:
+#                     (vid_dir / f"scene_{scene.scene_number:02d}.prompt.txt").write_text(vid_prompt, encoding="utf-8")
+#                 except Exception:  # noqa: BLE001
+#                     pass
 #                 gen = await mcp_client.generate(
 #                     "video",
-#                     prompt=_scene_video_prompt(scene, studio, speaker_role, listener_role, want_reaction),
+#                     prompt=vid_prompt,
 #                     model_hint="seedance",
 #                     image_refs=image_refs_arg,
 #                     image_files=image_files_arg,
 #                     audio_files=audio_files,
 #                     duration=duration,
 #                     aspect_ratio=s.hf_aspect_ratio,
-#                     resolution="720p",
+#                     resolution=_norm_video_resolution(s.hf_video_resolution),
 #                 )
 #                 await _download(gen["url"], final_clip)  # keep native synced audio; no trim
 #                 prev_clip = final_clip
@@ -631,7 +1121,7 @@
 #                     "prompt": _scene_video_prompt(scene, studio),
 #                     "image_url": identity_urls[role],
 #                     "duration": duration,
-#                     "resolution": s.hf_video_resolution,
+#                     "resolution": _norm_video_resolution(s.hf_video_resolution),
 #                     "aspect_ratio": s.hf_aspect_ratio,
 #                     "camera_fixed": _is_static_camera(scene.camera_movement),
 #                 })
@@ -659,6 +1149,27 @@
 #             _merge_with_reel_audio(scene_files, _find_reel_audio(base_dir), merged)
 #         job["merged_url"] = f"/renders/{render_id}/video/{merged.name}"
 
+#         # 5 · thumbnail — the two-shot 'both' image (both people in one frame) is used
+#         # ONLY here, as the reel thumbnail; it is never rendered as a video scene.
+#         # Falls back to the host image if no 'both' image was produced.
+#         try:
+#             import shutil as _sh
+#             thumb_src = None
+#             for cand in (img_dir / "both.png", img_dir / "host.png"):
+#                 if cand.exists():
+#                     thumb_src = cand
+#                     break
+#             if thumb_src:
+#                 thumb = base_dir / "thumbnail.png"
+#                 _sh.copyfile(thumb_src, thumb)
+#                 job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
+#                 _update(job, step=(f"Thumbnail saved from the {'two-shot' if thumb_src.name == 'both.png' else 'host'} "
+#                                    f"image ({thumb.name})"))
+#             else:
+#                 _update(job, step="No image available for a thumbnail (skipped).")
+#         except Exception as e:  # noqa: BLE001 — thumbnail must never fail the reel
+#             logger.warning("thumbnail generation failed: %s", e)
+
 #         _update(job, status="completed", step="Done")
 #     except Exception as e:  # noqa: BLE001 — job must capture any failure
 #         logger.exception("Video job %s failed", job_id)
@@ -667,9 +1178,13 @@
 
 # def clear_identity_cache(role: str | None = None) -> list[str]:
 #     cleared = []
-#     roles = [role] if role else ["host", "guest"]
+#     roles = [role] if role else ["host", "guest", "both"]
 #     for r in roles:
-#         for f in (IDENTITY_CACHE_DIR / f"{r}.json", IDENTITY_CACHE_DIR / f"{r}.png"):
+#         # the legacy single-look files AND every per-profile look (role__profile.*)
+#         targets = [IDENTITY_CACHE_DIR / f"{r}.json", IDENTITY_CACHE_DIR / f"{r}.png"]
+#         targets += list(IDENTITY_CACHE_DIR.glob(f"{r}__*.json"))
+#         targets += list(IDENTITY_CACHE_DIR.glob(f"{r}__*.png"))
+#         for f in targets:
 #             if f.exists():
 #                 f.unlink(); cleared.append(f.name)
 #     return cleared
@@ -677,9 +1192,21 @@
 
 # def identity_cache_status() -> dict:
 #     out = {}
-#     for r in ("host", "guest"):
-#         meta = IDENTITY_CACHE_DIR / f"{r}.json"
-#         out[r] = json.loads(meta.read_text(encoding="utf-8")).get("ref") if meta.exists() else None
+#     for r in ("host", "guest", "both"):
+#         looks = {}
+#         legacy = IDENTITY_CACHE_DIR / f"{r}.json"
+#         if legacy.exists():
+#             try:
+#                 looks["default"] = json.loads(legacy.read_text(encoding="utf-8")).get("ref")
+#             except Exception:  # noqa: BLE001
+#                 pass
+#         for meta in IDENTITY_CACHE_DIR.glob(f"{r}__*.json"):
+#             look = meta.stem.split("__", 1)[1]
+#             try:
+#                 looks[look] = json.loads(meta.read_text(encoding="utf-8")).get("ref")
+#             except Exception:  # noqa: BLE001
+#                 pass
+#         out[r] = looks or None
 #     return out
 
 
@@ -694,7 +1221,6 @@
 #     }
 #     asyncio.get_event_loop().create_task(run_video_job(job_id, render_id, blueprint))
 #     return job_id
-
 
 
 """Higgsfield video generation pipeline — Milestone 3 (verified API schemas).
@@ -762,9 +1288,17 @@ def _identity_signature(photo: Path, studio: str, model: str) -> str:
     return h.hexdigest()[:16]
 
 
-def _identity_cache_load(role: str, signature: str) -> dict | None:
-    meta = IDENTITY_CACHE_DIR / f"{role}.json"
-    png = IDENTITY_CACHE_DIR / f"{role}.png"
+def _cache_stem(role: str, key: str = "") -> str:
+    """Cache filename stem. With a variation profile key, each look is cached
+    separately (role__profile) so a new reel's profile regenerates while a repeat
+    profile reuses; without a key it's the legacy single-look stem (role)."""
+    return f"{role}__{key}" if key else role
+
+
+def _identity_cache_load(role: str, signature: str, key: str = "") -> dict | None:
+    stem = _cache_stem(role, key)
+    meta = IDENTITY_CACHE_DIR / f"{stem}.json"
+    png = IDENTITY_CACHE_DIR / f"{stem}.png"
     if meta.exists() and png.exists():
         try:
             data = json.loads(meta.read_text(encoding="utf-8"))
@@ -780,17 +1314,30 @@ def _identity_cache_load(role: str, signature: str) -> dict | None:
 
 
 def _identity_cache_save(role: str, signature: str, url: str, ref: str, src_png: Path,
-                          locked: bool = False):
+                          locked: bool = False, key: str = ""):
     import shutil
-    dest_png = IDENTITY_CACHE_DIR / f"{role}.png"
+    stem = _cache_stem(role, key)
+    dest_png = IDENTITY_CACHE_DIR / f"{stem}.png"
     if Path(src_png).resolve() != dest_png.resolve():
         shutil.copyfile(src_png, dest_png)
-    (IDENTITY_CACHE_DIR / f"{role}.json").write_text(
+    (IDENTITY_CACHE_DIR / f"{stem}.json").write_text(
         json.dumps({"signature": signature, "url": url, "ref": ref, "locked": locked}, indent=2),
         encoding="utf-8",
     )
 
 SEEDANCE_MIN_DUR, SEEDANCE_MAX_DUR = 2, 12
+
+_VALID_VIDEO_RES = {"480p", "720p", "1080p"}
+
+
+def _norm_video_resolution(value: str) -> str:
+    """Coerce a config/env resolution into a value Seedance accepts. Seedance only
+    allows 480p / 720p / 1080p (the trailing 'p' is REQUIRED), so '1080' -> '1080p'.
+    Anything unrecognized falls back to 720p rather than erroring the whole clip."""
+    v = (value or "").strip().lower()
+    if v and not v.endswith("p") and v.isdigit():
+        v = v + "p"
+    return v if v in _VALID_VIDEO_RES else "720p"
 
 
 # ── Character photo storage ───────────────────────────────
@@ -883,62 +1430,218 @@ async def _download(url: str, dest: Path):
         dest.write_bytes(r.content)
 
 
-# A FIXED, literal description of the REAL studio seen in the reference photos,
-# used identically across all prompts so host, guest and the two-shot all render in
-# the SAME room. This is the one shared studio look that standardizes every image.
-_FIXED_SET = (
-    "SAME EXACT modern podcast studio in every shot (do not vary it): a tall matte-black "
-    "built-in bookshelf-and-cabinet back wall with warm interior LED accent lighting, "
-    "glass-front upper cabinets and cane/rattan-front lower cabinets, styled with hardcover "
-    "books, small green potted plants and white flowers, a polished live-edge wood-slice "
-    "sculpture on a stand, a small white astronaut figurine, and framed black-background "
-    "white-text motivational typography posters (e.g. 'DISCIPLINE EQUALS FREEDOM'); the people "
-    "sit in mid-century grey upholstered armchairs with wooden frames; a black dynamic "
-    "microphone on a black boom arm reaches in from the side; a neutral patterned area rug on a "
-    "dark wood floor. Warm, moody, low-key cinematic lighting. This identical studio, "
-    "cabinetry, books, decor, posters, armchairs, microphone and warm lighting must appear in "
-    "every single shot so all scenes look like one continuous recording in the same room."
+# The UNCHANGING room structure — same in every reel. The specific poster art,
+# decor objects and wardrobe are NOT fixed here; they come from a per-reel variation
+# profile (below) so different reels look fresh while staying consistent within a reel.
+_STUDIO_STRUCTURE = (
+    "a modern in-person podcast studio: a tall matte-black built-in bookshelf-and-cabinet back wall with "
+    "warm interior LED accent lighting, glass-front upper cabinets and cane/rattan-front lower cabinets; the "
+    "people sit in mid-century grey upholstered armchairs with wooden frames; a black dynamic microphone on a "
+    "black boom arm reaches in from the side; a neutral area rug on a dark wood floor; warm, moody, low-key "
+    "cinematic lighting"
 )
 
-# A short canonical studio phrase for the (token-limited) director briefs, so the
-# brief never depends on the planner's free-text background (which can drift).
-_STUDIO_SHORT = (
-    "the same fixed studio — matte-black bookshelf/cabinet wall with warm LED accent lighting, "
-    "books, plants, a live-edge wood slice, an astronaut figurine and motivational typography "
-    "posters, mid-century grey upholstered armchairs, a black boom microphone, neutral rug, warm "
-    "moody lighting"
+# Per-reel VARIATION PROFILES. Each new reel rotates to the next profile so the wall
+# art, the objects on the shelves and the speakers' clothing change between reels —
+# while the room, the faces and (within one reel) everything stay consistent. Faces
+# are always preserved from the real reference photo; only background + wardrobe vary.
+_VARIATION_PROFILES = [
+    {
+        "id": "modern_abstract",
+        "poster": "a large framed original abstract painting with bold muted color blocks and gestural brush "
+                  "strokes — NO text, NO words, no logos and no recognizable artwork",
+        "decor": "stacked plain hardcover books, a small green potted plant, a smooth ceramic vase and a "
+                 "polished live-edge wood-slice sculpture on a stand",
+        "wardrobe": {"host": "a plain charcoal crew-neck sweater (no logos)",
+                     "guest": "a plain black short-sleeve polo shirt (no logos or text)"},
+    },
+    {
+        "id": "nature_photo",
+        "poster": "a large framed black-and-white nature photograph of misty forest trees in a thin matte-black "
+                  "frame — NO text, no words, no logos",
+        "decor": "a softly glowing geode lamp, a small succulent, a folded wool throw and a few plain books",
+        "wardrobe": {"host": "a plain dark navy button-down shirt (no logos)",
+                     "guest": "a plain black quarter-zip sweater (no logos)"},
+    },
+    {
+        "id": "line_art",
+        "poster": "a large framed minimalist single-line botanical line-art print in black ink on a cream "
+                  "background — abstract lines only, NO words, no logos",
+        "decor": "a matte black ceramic vase with dried pampas grass, a short stack of plain design books and "
+                 "a small abstract brass sculpture",
+        "wardrobe": {"host": "a plain slate-grey henley (no logos)",
+                     "guest": "a plain dark olive crew-neck sweater (no logos)"},
+    },
+    {
+        "id": "calm_typography",
+        "poster": "a large framed minimalist poster showing a single common everyday word in clean white "
+                  "uppercase sans-serif on a plain dark background — a generic ordinary word only, NOT a brand "
+                  "name, slogan, quote, book title, song lyric or any recognizable phrase",
+        "decor": "a potted fern, a plain ceramic mug, a small stack of unbranded notebooks and a smooth river "
+                 "stone",
+        "wardrobe": {"host": "a plain black crew-neck long-sleeve sweater (no logos)",
+                     "guest": "a plain dark charcoal polo shirt (no logos or text)"},
+    },
+]
+_VARIATION_STATE = IDENTITY_CACHE_DIR / "variation_state.json"
+
+
+def _profile_by_id(pid: str) -> dict | None:
+    return next((p for p in _VARIATION_PROFILES if p["id"] == pid), None)
+
+
+def _select_variation_profile() -> dict | None:
+    """Pick the variation profile for THIS reel. 'auto' rotates to the next profile
+    each render (so consecutive reels differ); a specific id pins one; 'none' or
+    variation off returns None (→ the legacy single fixed look)."""
+    s = get_settings()
+    if not getattr(s, "vary_across_reels", True):
+        return None
+    choice = (getattr(s, "variation_profile", "auto") or "auto").strip().lower()
+    if choice in ("none", "off", ""):
+        return None
+    if choice != "auto":
+        return _profile_by_id(choice)  # pinned profile (or None if unknown)
+    # auto-rotate via a small persistent counter
+    n = 0
+    try:
+        n = int(json.loads(_VARIATION_STATE.read_text(encoding="utf-8")).get("n", 0))
+    except Exception:  # noqa: BLE001
+        n = 0
+    profile = _VARIATION_PROFILES[n % len(_VARIATION_PROFILES)]
+    try:
+        _VARIATION_STATE.write_text(json.dumps({"n": n + 1}), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return profile
+
+
+def _studio_for_profile(profile: dict | None) -> str:
+    """The full studio description used for IMAGE generation: fixed structure plus
+    this reel's specific poster art and decor objects."""
+    if not profile:
+        return (_STUDIO_STRUCTURE + "; on the back wall, a large framed original abstract art print with NO "
+                "text or logos; stacked plain books, small plants and tasteful unbranded decor on the shelves")
+    return (f"{_STUDIO_STRUCTURE}; on the back wall, {profile['poster']}; on and around the shelves, "
+            f"{profile['decor']}")
+
+
+# A FIXED studio reference used by the VIDEO prompts/enforcement. It is deliberately
+# poster-agnostic: it defers to the per-reel identity image so a reel stays internally
+# consistent (same poster/decor/wardrobe as that reel's locked image) without pinning
+# one specific poster across all reels.
+_FIXED_SET = (
+    "SAME EXACT studio in every shot of this reel — " + _STUDIO_STRUCTURE + ". Keep the wall art/posters, the "
+    "framed pieces, the objects on the shelves AND each person's clothing EXACTLY as they appear in the "
+    "supplied reference image — do not invent different posters, different decor or different clothes. "
+    "Everything matches the reference image so all scenes look like one continuous recording in the same room."
 )
+
+# Short canonical studio phrase for the (token-limited) director briefs.
+_STUDIO_SHORT = (
+    "the same fixed studio as the reference image — matte-black bookshelf/cabinet wall with warm LED accent "
+    "lighting, mid-century grey upholstered armchairs, a black boom microphone, neutral rug, warm moody "
+    "lighting; keep the SAME wall art, decor and clothing as the reference image"
+)
+
+# ── Fixed seating canon (viewer's perspective) ────────────
+# The seating is a FACT of the real set and never changes between clips: the GUEST
+# sits on the LEFT of frame, the HOST sits on the RIGHT. Everything directional
+# (which way a speaker faces, where their eyes go) is DERIVED from this, so it is
+# deterministic — never invented per scene. A person on the right looks LEFT toward
+# the other; a person on the left looks RIGHT.
+SEAT_SIDE = {"host": "right", "guest": "left"}
+
+# Hard rule against Seedance burning ANY text into the picture. Seedance is
+# Chinese-origin and will sometimes render subtitles/captions (often Chinese)
+# unless explicitly forbidden; this is repeated in every video layer.
+_NO_TEXT = (
+    "ABSOLUTELY NO on-screen text of any kind anywhere in the frame: no captions, no subtitles, no closed "
+    "captions, no burned-in words, no karaoke text, no lower-thirds, no titles, no name tags, no caption "
+    "bar, no watermark, no logos, and no Chinese or English characters rendered into the video. The frame "
+    "shows ONLY the filmed scene — clean image, zero graphics or text overlays."
+)
+
+# Hard rule against rendering anyone's intellectual property. Real generative
+# platforms (Higgsfield included) refuse a job with "IP detected" if the prompt or
+# the reference image contains a brand logo, trademark, real book/album title,
+# slogan or recognizable copyrighted artwork. Since WE produce the image that is fed
+# to the video step, we forbid IP at the source.
+_NO_IP = (
+    "Do NOT depict any brand logos, trademarks, company names, sports/team marks, real book, album or movie "
+    "titles, advertising slogans, song lyrics, famous quotes, or any recognizable copyrighted artwork or "
+    "character — anywhere in the frame, including on clothing, posters, wall art, mugs, books, screens or "
+    "props. Use only generic, original, unbranded designs; any clothing must be plain with no visible logos "
+    "or text."
+)
+
+
+def _other_dir(side: str) -> str:
+    """The direction someone on `side` must look to face the other person."""
+    return "left" if side == "right" else "right"
+
+
+def _seat_phrase(role: str) -> str:
+    """e.g. 'seated on the RIGHT side of the frame (the host's fixed seat)'."""
+    side = SEAT_SIDE.get(role, "right")
+    return f"seated on the {side.upper()} side of the frame (the {role}'s fixed seat)"
+
+
+def _eyeline_phrase(speaker: str, listener: str) -> str:
+    """Deterministic eye-line: the speaker turns toward the listener's fixed side."""
+    s_side = SEAT_SIDE.get(speaker, "right")
+    look = _other_dir(s_side)                       # direction to face the other person
+    l_side = SEAT_SIDE.get(listener, _other_dir(s_side))
+    return (f"the {speaker} is {_seat_phrase(speaker)} and turns to look toward their {look} "
+            f"(screen-{look}), where the {listener} sits ({l_side} of frame), NOT into the camera")
 
 
 # ── Prompt building ───────────────────────────────────────
-def _identity_image_prompt(role: str, studio: str) -> str:
+def _wardrobe_for(profile: dict | None, role: str) -> str | None:
+    if not profile:
+        return None
+    return (profile.get("wardrobe") or {}).get(role)
+
+
+def _identity_image_prompt(role: str, studio: str, profile: dict | None = None) -> str:
+    set_desc = _studio_for_profile(profile)
     if role == "both":
+        wh = _wardrobe_for(profile, "host")
+        wg = _wardrobe_for(profile, "guest")
+        clothes = (f" Dress the HOST in {wh} and the GUEST in {wg}, but keep BOTH people's faces, hair, "
+                   f"beards and build EXACTLY as in the reference photo." if (wh and wg) else
+                   " Keep BOTH people's faces, hair, beards, build and their black/dark clothing exactly as shown.")
         return (
             f"The TWO exact people from the reference photo together as podcast co-hosts, seated SIDE BY SIDE "
-            f"in two separate mid-century grey upholstered armchairs, angled slightly toward each other, both "
-            f"fully visible in one balanced two-shot. {_FIXED_SET} A black dynamic microphone on a black boom "
-            f"arm reaches in toward each of them from the side, NO headphones (in-person conversation), relaxed "
-            f"natural posture, mid-conversation. Faithfully REPLICATE the reference photo: keep BOTH people's "
-            f"faces, hair, beards, build and their black/dark clothing exactly as shown — do not swap or merge "
-            f"their identities. Wide-to-medium vertical 9:16 two-shot, photographic and lifelike (natural skin "
-            f"texture, visible pores, catchlights), warm moody low-key lighting, true-to-life colour, sharp "
-            f"focus. No on-screen text, no watermark, no logos, NOT a 3D render, NOT illustration, NOT anime."
+            f"in two separate mid-century grey upholstered armchairs angled slightly toward each other — the "
+            f"GUEST on the LEFT of frame, the HOST on the RIGHT (viewer's perspective) — both fully visible in "
+            f"one balanced two-shot. {set_desc}. A black dynamic microphone on a black boom arm reaches in "
+            f"toward each of them from the side, NO headphones (in-person conversation), relaxed natural "
+            f"posture, mid-conversation.{clothes} Do not swap or merge their identities. Wide-to-medium "
+            f"vertical 9:16 two-shot, photographic and lifelike (natural skin texture, visible pores, "
+            f"catchlights), warm moody low-key lighting, true-to-life colour, sharp focus. No on-screen text, "
+            f"no watermark, no logos, NOT a 3D render, NOT illustration, NOT anime. " + _NO_IP
         )
     label = "HOST" if role == "host" else "GUEST"
+    w = _wardrobe_for(profile, role)
+    clothes = (f"Keep the person's face, hair, beard and build EXACTLY as in the reference photo, but dress "
+               f"them in {w} (their clothing for this episode)." if w else
+               "Keep the person's face, hair, beard, build and their black/dark clothing exactly as in the "
+               "reference photo.")
     return (
-        f"Faithfully REPLICATE the reference photo of this exact person as a podcast {label}, seated in a "
-        f"mid-century grey upholstered armchair with a wooden frame, framed as a SINGLE-PERSON SHOT — ONLY "
-        f"this one person is visible in frame, no second person, no one sitting opposite. {_FIXED_SET} A black "
-        f"dynamic microphone on a black boom arm reaches in from the side, NO headphones (this is an in-person "
-        f"conversation), body relaxed and angled slightly toward the other person (off-camera to the side), "
-        f"hands resting naturally. Keep the person's face, hair, beard, build and their black/dark clothing "
-        f"exactly as in the reference photo — same wardrobe, same studio, same warm lighting. Looking off to "
-        f"the side toward the other person (not into the lens). Vertical 9:16 composition. "
+        f"Faithfully reproduce this exact person as a podcast {label}, seated in a mid-century grey "
+        f"upholstered armchair with a wooden frame, framed as a SINGLE-PERSON SHOT — ONLY this one person is "
+        f"visible in frame, no second person, no one sitting opposite. {set_desc}. A black dynamic microphone "
+        f"on a black boom arm reaches in from the side, NO headphones (this is an in-person conversation). The "
+        f"person is {_seat_phrase(role)}, body and gaze turned toward their "
+        f"{_other_dir(SEAT_SIDE.get(role, 'right'))} (screen-{_other_dir(SEAT_SIDE.get(role, 'right'))}) where "
+        f"the other person sits off-camera, hands resting naturally. {clothes} Looking toward the other person "
+        f"off-camera (not into the lens). Vertical 9:16 composition. "
         f"PHOTOREALISTIC like a real photograph of a real human shot on a cinema camera with a 50mm lens and "
         f"shallow depth of field; lifelike skin with natural texture, visible pores and subtle subsurface "
         f"tones (never airbrushed, plastic or waxy); catchlights in the eyes; warm moody studio lighting; "
         f"true-to-life colour. Sharp focus, no text, no watermark, "
-        f"no logos, NOT a 3D render, NOT illustration, NOT anime/cartoon."
+        f"no logos, NOT a 3D render, NOT illustration, NOT anime/cartoon. " + _NO_IP
     )
 
 
@@ -963,8 +1666,8 @@ def _scene_video_prompt(scene: Scene, studio: str, speaker_role: str,
     listener = listener_role.lower()
     cam = _sanitize_camera(scene.camera_movement)
     body = (scene.body_language or "").strip()
-    eyes = (scene.eye_contact or "looking naturally toward the other person to the side, "
-            "with occasional brief glances down or to the microphone in thought").strip()
+    eyes = (scene.eye_contact or "natural engaged expression, with occasional brief glances down "
+            "or to the microphone in thought").strip()
     tone = (scene.emotional_tone or "").strip()
     humor = (scene.humor or "").strip()
     cue = (scene.reaction_cue or "listening intently and nodding slowly, attentive and engaged").strip()
@@ -993,14 +1696,16 @@ def _scene_video_prompt(scene: Scene, studio: str, speaker_role: str,
     if humor:
         parts.append(f"Subtle, natural touch (only if it fits the moment): {humor}.")
     parts.append(
-        f"Eye contact: {eyes}. This is a real in-person conversation — the {speaker} looks mostly toward the "
-        f"OTHER person off to the side, NOT into the camera (no fixed camera stare)."
+        f"Position & eye contact: {_eyeline_phrase(speaker, listener)}. {eyes}. "
+        f"This is a real in-person conversation — no fixed camera stare."
     )
 
     if want_reaction:
         parts.append(
             f"REACTION BEAT (still single-person — no two-shot): for a brief moment, about 1 to 2 seconds in "
-            f"the middle of the clip, cut to the {listener} ALONE in frame (use the SECOND reference image) — "
+            f"the middle of the clip, cut to the {listener} ALONE in frame (use the SECOND reference image), "
+            f"{_seat_phrase(listener)}, looking toward their {_other_dir(SEAT_SIDE.get(listener, 'left'))} "
+            f"(screen-{_other_dir(SEAT_SIDE.get(listener, 'left'))}) where the {speaker} sits off-camera — "
             f"{cue}; mouth closed, NOT speaking, just a natural listening reaction such as a slow nod or a small "
             f"empathetic look — then cut back to the {speaker} speaking. The audio keeps playing throughout (it is "
             f"the {speaker}'s voice); the {listener} never talks. Even during this brief cut, only ONE person is on "
@@ -1024,8 +1729,8 @@ def _scene_video_prompt(scene: Scene, studio: str, speaker_role: str,
     # Negative guidance
     parts.append(
         f"Negative: do NOT change the people, do NOT change the location; no two people in one frame, no second "
-        f"person in the background, no headphones, no on-screen text, no captions, no logos, no cartoon/anime/3D-"
-        f"render look, no plastic or waxy skin, no fixed camera stare."
+        f"person in the background, no headphones, no cartoon/anime/3D-render look, no plastic or waxy skin, no "
+        f"fixed camera stare. " + _NO_TEXT + " " + _NO_IP
     )
     return " ".join(parts)
 
@@ -1037,46 +1742,60 @@ def _scene_video_prompt(scene: Scene, studio: str, speaker_role: str,
 # (identity, fixed studio, single-person framing, no headphones, lip-sync).
 # They deliberately reuse the same canon (_FIXED_SET) and constraint language as
 # the built-in fallback prompts so directed and fallback prompts stay aligned.
-def _image_concept_brief(role: str, studio: str) -> str:
+def _image_concept_brief(role: str, studio: str, profile: dict | None = None) -> str:
+    set_desc = _studio_for_profile(profile)
     if role == "both":
+        wh, wg = _wardrobe_for(profile, "host"), _wardrobe_for(profile, "guest")
+        wear = (f" Dress the host in {wh} and the guest in {wg}, faces unchanged from the reference."
+                if (wh and wg) else " Same wardrobe and faces as the reference photo.")
         return (
             f"An editorial two-shot photograph of TWO real podcast co-hosts seated SIDE BY SIDE in two "
-            f"separate mid-century grey upholstered armchairs, angled slightly toward each other, a black boom "
-            f"microphone reaching in toward each from the side, relaxed and mid-conversation. Both people fully "
-            f"visible in one balanced frame. Vertical 9:16. Faithfully reproduce the reference photo (same "
-            f"people, same wardrobe, same studio). Aim for a believable real-photograph look (film/editorial, "
-            f"not glossy CGI). Studio: {_FIXED_SET}"
+            f"separate mid-century grey upholstered armchairs angled slightly toward each other — GUEST on the "
+            f"LEFT of frame, HOST on the RIGHT (viewer perspective) — a black boom microphone reaching in "
+            f"toward each from the side, relaxed and mid-conversation. Both people fully visible in one "
+            f"balanced frame. Vertical 9:16. Keep BOTH faces exactly from the reference photo.{wear} Aim for a "
+            f"believable real-photograph look (film/editorial, not glossy CGI). Studio: {set_desc}"
         )
     who = "podcast host" if role == "host" else "podcast guest"
+    w = _wardrobe_for(profile, role)
+    wear = (f" Dress them in {w}; keep the face/hair/beard exactly from the reference photo."
+            if w else " Same face and black/dark wardrobe as the reference photo.")
     return (
         f"Single editorial portrait of one real {who} seated in a mid-century grey upholstered armchair in a "
         f"warm in-person podcast studio, a black boom microphone reaching in from the side, body relaxed and "
         f"angled slightly toward the other person off to the side (off-camera), looking off to the side (not at "
-        f"the lens). One person only in frame. Vertical 9:16. Faithfully reproduce the reference photo (same "
-        f"person, same black/dark wardrobe, same studio). Aim for a believable real-photograph look "
-        f"(film/editorial, not glossy CGI). Studio: {_FIXED_SET}"
+        f"the lens). One person only in frame. Vertical 9:16. Keep the face exactly from the reference "
+        f"photo.{wear} Aim for a believable real-photograph look (film/editorial, not glossy CGI). "
+        f"Studio: {set_desc}"
     )
 
 
-def _image_enforcement(role: str) -> str:
+def _image_enforcement(role: str, profile: dict | None = None) -> str:
+    set_desc = _studio_for_profile(profile)
     if role == "both":
+        wh, wg = _wardrobe_for(profile, "host"), _wardrobe_for(profile, "guest")
+        wear = (f" Dress the HOST in {wh} and the GUEST in {wg}; keep BOTH faces, hair, beards and build "
+                f"EXACTLY from the reference photo." if (wh and wg)
+                else " Keep BOTH people's faces, hair, beards, build and clothing EXACTLY from the reference.")
         return (
-            "NON-NEGOTIABLE CONSTRAINTS (override anything above that conflicts): " + _FIXED_SET +
-            " Keep BOTH people's faces, hair, beards, build and their black/dark clothing EXACTLY as in the "
-            "supplied reference photo — do not swap, merge or invent identities. A balanced TWO-SHOT: both "
-            "people fully visible, seated SIDE BY SIDE in separate grey armchairs angled slightly toward each "
-            "other. NO headphones (in-person conversation). Vertical 9:16. No on-screen text, no captions, no "
-            "watermark, no logos. Render as a real photograph (natural skin texture, visible pores, "
-            "catchlights), NOT a 3D render, NOT illustration, NOT anime."
+            "NON-NEGOTIABLE CONSTRAINTS (override anything above that conflicts): Studio = " + set_desc + "." +
+            wear + " Do not swap, merge or invent identities. A balanced TWO-SHOT: both people fully visible, "
+            "seated SIDE BY SIDE in separate grey armchairs angled slightly toward each other — the GUEST on "
+            "the LEFT of frame and the HOST on the RIGHT (viewer perspective). NO headphones. Vertical 9:16. "
+            "No on-screen text, no captions, no watermark, no logos. Render as a real photograph (natural skin "
+            "texture, visible pores, catchlights), NOT a 3D render, NOT illustration, NOT anime. " + _NO_IP
         )
+    w = _wardrobe_for(profile, role)
+    wear = (f" Dress the person in {w}, but keep their face, hair, beard and build EXACTLY from the supplied "
+            f"reference image — zero identity changes." if w
+            else " Keep the person's face, hair, beard, build and black/dark clothing EXACTLY from the "
+                 "supplied reference image — zero identity changes.")
     return (
-        "NON-NEGOTIABLE CONSTRAINTS (override anything above that conflicts): " + _FIXED_SET +
-        " Keep the person's face, hair, beard, build and their black/dark clothing EXACTLY as in the supplied "
-        "reference image — zero identity changes, same wardrobe. SINGLE-PERSON SHOT: only this one person is "
-        "visible, no second person, no one sitting opposite. They sit in a mid-century grey upholstered "
-        "armchair. NO headphones (in-person conversation). Vertical 9:16. No on-screen text, no captions, no "
-        "watermark, no logos. Render as a real photograph (natural skin texture, visible pores, catchlights), "
-        "NOT a 3D render, NOT illustration, NOT anime."
+        "NON-NEGOTIABLE CONSTRAINTS (override anything above that conflicts): Studio = " + set_desc + "." +
+        wear + " SINGLE-PERSON SHOT: only this one person is visible, no second person, no one sitting "
+        "opposite. They sit in a mid-century grey upholstered armchair. NO headphones. Vertical 9:16. No "
+        "on-screen text, no captions, no watermark, no logos. Render as a real photograph (natural skin "
+        "texture, visible pores, catchlights), NOT a 3D render, NOT illustration, NOT anime. " + _NO_IP
     )
 
 
@@ -1085,10 +1804,10 @@ def _video_concept_brief(scene: Scene, speaker: str, listener: str,
     bits = [
         f"A calm, friendly IN-PERSON podcast conversation clip, about {duration}s, vertical 9:16, single "
         f"camera, minimal cuts. The {speaker} is the on-camera speaker; the {listener} is the other "
-        f"participant (off-camera, seated to the side). This is a relaxed studio chat — not action, not a "
+        f"participant (off-camera). {_eyeline_phrase(speaker, listener)}. This is a relaxed studio chat — not action, not a "
         f"confrontation.",
         f"The {speaker}'s spoken audio is SUPPLIED separately — do NOT write any dialogue, narration or "
-        f"subtitles; only describe the visible performance that lip-syncs to that audio.",
+        f"subtitles; only describe the visible performance that lip-syncs to that audio. Render a CLEAN frame with NO on-screen text, captions or subtitles burned into the picture.",
         f"What the {speaker} does on this line: {scene.character_action}.",
         f"Facial expression: {scene.facial_expression}.",
     ]
@@ -1098,7 +1817,7 @@ def _video_concept_brief(scene: Scene, speaker: str, listener: str,
         bits.append(f"Emotional tone: {scene.emotional_tone}.")
     if (scene.humor or "").strip():
         bits.append(f"Light optional touch (only if it fits): {scene.humor}.")
-    eyes = (scene.eye_contact or "looks mostly toward the other person to the side, brief glances down").strip()
+    eyes = (scene.eye_contact or "natural engaged expression, brief glances down in thought").strip()
     bits.append(f"Eye-line: {eyes} (not staring at the camera).")
     bits.append(f"Camera: {cam}.")
     if want_reaction:
@@ -1122,6 +1841,11 @@ def _video_enforcement(scene: Scene, speaker: str, listener: str, want_reaction:
         f"lip-sync to the PROVIDED audio track — say only what the audio says, never invent or mouth words "
         f"not in the audio. Do NOT add any spoken dialogue, narration, subtitles or an Audio section; the "
         f"audio is supplied separately.",
+        f"FIXED SEATING (viewer's perspective, identical in every clip): the GUEST sits on the LEFT of the "
+        f"frame, the HOST sits on the RIGHT. The on-camera {speaker} is therefore {_seat_phrase(speaker)} and "
+        f"must face/lean toward their {_other_dir(SEAT_SIDE.get(speaker, 'right'))} (screen-"
+        f"{_other_dir(SEAT_SIDE.get(speaker, 'right'))}) toward the off-camera {listener} — never the wrong way, "
+        f"never straight into the lens.",
     ]
     if want_reaction:
         parts.append(
@@ -1135,8 +1859,8 @@ def _video_enforcement(scene: Scene, speaker: str, listener: str, want_reaction:
         "Preserve each person's exact face, hair, beard, skin tone and clothing from their OWN reference "
         "image, zero identity changes. NO headphones (they sit face to face). " + _FIXED_SET +
         " Ultra-real human look: natural skin texture and pores, catchlights, realistic blinking and "
-        "micro-expressions; not plastic, waxy, cartoon, anime or 3D-render. No on-screen text, no captions, "
-        "no logos, no fixed camera stare."
+        "micro-expressions; not plastic, waxy, cartoon, anime or 3D-render; no fixed camera stare. " + _NO_TEXT
+        + " " + _NO_IP
     )
     return " ".join(parts)
 
@@ -1150,7 +1874,8 @@ def _two_shot_video_prompt(scene: Scene, studio: str, speaker: str, listener: st
     return (
         f"A photorealistic establishing TWO-SHOT of an in-person podcast: BOTH the {spk} and the {lis} are "
         f"visible together in one frame, seated SIDE BY SIDE in two separate mid-century grey upholstered "
-        f"armchairs angled slightly toward each other in the studio. "
+        f"armchairs angled slightly toward each other — the GUEST on the LEFT of frame, the HOST on the RIGHT "
+        f"(viewer perspective) — in the studio. "
         f"This is a wide-to-medium vertical 9:16 two-shot that establishes the scene. The {spk} is speaking "
         f"into the microphone — the {spk}'s mouth movements must lip-sync to the provided audio track (say "
         f"only what the audio says, never invent words); the {lis} listens and gives small natural nods. "
@@ -1159,7 +1884,7 @@ def _two_shot_video_prompt(scene: Scene, studio: str, speaker: str, listener: st
         f"the other; do not swap or merge them. No headphones (in-person). " + _FIXED_SET + " Camera: slow gentle "
         f"push-in, single continuous take. Ultra-real human look: natural skin texture and pores, "
         f"catchlights, realistic blinking and micro-expressions; not plastic, waxy, cartoon, anime or "
-        f"3D-render. No on-screen text, no captions, no logos."
+        f"3D-render. " + _NO_TEXT
     )
 
 
@@ -1169,7 +1894,7 @@ def _two_shot_concept_brief(scene: Scene, speaker: str, listener: str, duration:
         f"are visible together in one frame, seated SIDE BY SIDE in separate grey armchairs angled toward each other: the {speaker} is "
         f"speaking, the {listener} is listening and nodding. This opening shot establishes the room and the "
         f"pair before the conversation cuts to single talking heads. The {speaker}'s spoken audio is SUPPLIED "
-        f"separately — do NOT write dialogue; only describe the visible performance lip-syncing to it. "
+        f"separately — do NOT write dialogue; only describe the visible performance lip-syncing to it. Keep the frame CLEAN — no captions, subtitles or on-screen text. "
         f"What the {speaker} does: {scene.character_action}. Camera: {cam}. Keep it a calm studio chat, not "
         f"action. Studio: {_STUDIO_SHORT}."
     )
@@ -1179,7 +1904,8 @@ def _two_shot_enforcement(scene: Scene, speaker: str, listener: str) -> str:
     return (
         "NON-NEGOTIABLE TECHNICAL CONTRACT (override anything above that conflicts): This is the ONE "
         "establishing two-shot — BOTH people are intentionally visible together in one balanced frame, "
-        "seated SIDE BY SIDE in separate grey armchairs angled toward each other. Do NOT add extra people. " +
+        "seated SIDE BY SIDE in separate grey armchairs angled toward each other — the GUEST on the LEFT of "
+        "frame and the HOST on the RIGHT (viewer perspective). Do NOT add extra people. " +
         f"The {speaker} is the speaker and lip-syncs EXACTLY to the PROVIDED audio (say only what the audio "
         f"says, never invent or mouth words; no added dialogue, narration, subtitles or Audio section); the "
         f"{listener} listens with mouth closed and small natural nods. Preserve BOTH identities exactly from "
@@ -1187,7 +1913,7 @@ def _two_shot_enforcement(scene: Scene, speaker: str, listener: str) -> str:
         f"faces. NO headphones. " + _FIXED_SET +
         " Single continuous take, gentle push-in. Ultra-real human look: natural skin texture and pores, "
         "catchlights, realistic blinking and micro-expressions; not plastic, waxy, cartoon, anime or "
-        "3D-render. No on-screen text, no captions, no logos."
+        "3D-render. " + _NO_TEXT
     )
 
 
@@ -1309,6 +2035,15 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
         studio = canon["studio"]
         (base_dir / "visual_canon.json").write_text(json.dumps(canon, indent=2), encoding="utf-8")
 
+        # Per-reel VARIATION PROFILE: chosen once for the whole reel so every scene in
+        # this reel shares one look (same poster art, decor and wardrobe), while the
+        # NEXT reel rotates to a different look. Faces always come from the real photo.
+        reel_profile = _select_variation_profile()
+        job["variation_profile"] = (reel_profile or {}).get("id", "default")
+        if reel_profile:
+            _update(job, step=(f"This reel's look: '{reel_profile['id']}' — "
+                               f"{reel_profile['poster'][:60]}... (consistent across this reel)"))
+
         use_mcp = s.video_provider.lower() == "hf_mcp"
         mcp_client = higgsfield_mcp.HiggsfieldMCP(job=job) if use_mcp else None
 
@@ -1329,32 +2064,36 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
             import shutil
             both_photo = _character_path("both")
             photos = {"host": host_photo, "guest": guest_photo, "both": both_photo}
-            # host + guest always; 'both' only when the establishing two-shot is on
-            # AND we have either a locked 'both' identity or a both-photo to make one.
+            # host + guest are the on-camera talking heads. 'both' is generated ONLY to
+            # be used as the reel THUMBNAIL (it is never shown as a video scene), and
+            # only when we have a both-photo or a locked/cached 'both' image to make it.
             roles = ["host", "guest"]
             if get_settings().establishing_two_shot:
-                if both_photo or _identity_cache_load("both", "") or (IDENTITY_CACHE_DIR / "both.png").exists():
+                _pk = reel_profile["id"] if reel_profile else ""
+                if both_photo or _identity_cache_load("both", "", key=_pk) or (IDENTITY_CACHE_DIR / f"{_cache_stem('both', _pk)}.png").exists():
                     roles.append("both")
                 else:
-                    _update(job, step=("Establishing two-shot is ON but no 'both' photo/locked image found "
-                                       "(assets/characters/both.*) — the opening will fall back to a single "
-                                       "talking head."))
+                    _update(job, step=("No 'both' image available (assets/characters/both.*) — the reel will "
+                                       "render normally; the thumbnail will fall back to the host image."))
             for role in roles:
                 photo = photos[role]
                 # 1) Locked/cached identity is self-sufficient — reuse it even if
-                #    the original reference photo is no longer on disk.
-                sig = _identity_signature(photo, studio, "gpt_image_2") if photo else None
+                #    the original reference photo is no longer on disk. Cache is keyed
+                #    by the per-reel variation profile, so a NEW look regenerates while
+                #    a repeated look reuses (generate-once-per-look).
+                pkey = reel_profile["id"] if reel_profile else ""
+                studio_for_sig = _studio_for_profile(reel_profile)
+                sig = _identity_signature(photo, studio_for_sig, "gpt_image_2") if photo else None
                 cached = None
                 if not job.get("force_regen_identity"):
-                    # locked entries match regardless of signature; non-locked need sig
-                    cached = _identity_cache_load(role, sig if sig else "")
+                    cached = _identity_cache_load(role, sig if sig else "", key=pkey)
                     if not cached and sig:
-                        cached = _identity_cache_load(role, sig)
+                        cached = _identity_cache_load(role, sig, key=pkey)
                 if cached:
-                    _update(job, step=f"Reusing cached {role} identity image (0 credits)")
+                    _update(job, step=f"Reusing cached {role} identity image for this look (0 credits)")
                     identity_urls[role] = cached["url"]
                     identity_refs[role] = cached["ref"]
-                    cpng = IDENTITY_CACHE_DIR / f"{role}.png"
+                    cpng = IDENTITY_CACHE_DIR / f"{_cache_stem(role, pkey)}.png"
                     if cpng.exists():
                         shutil.copyfile(cpng, img_dir / f"{role}.png")
                     continue
@@ -1364,7 +2103,7 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                     raise RuntimeError(
                         f"No locked/cached identity for {role} and no reference photo at "
                         f"assets/characters/{role}.*. Add the photo or lock an image first.")
-                _update(job, step=f"Generating {role} identity image (first time for this photo/studio)")
+                _update(job, step=f"Generating {role} identity image (look: {pkey or 'default'})")
                 # The gpt-image-2 director skill writes the creative prompt; our
                 # enforcement suffix locks identity + studio + single-person + no
                 # headphones. Falls back to the built-in prompt if the skill is off
@@ -1372,11 +2111,12 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                 img_prompt = None
                 if get_settings().use_director_skills:
                     img_prompt = await director_skills.image_prompt(
-                        _image_concept_brief(role, studio), _image_enforcement(role))
+                        _image_concept_brief(role, studio, reel_profile),
+                        _image_enforcement(role, reel_profile))
                     if img_prompt:
                         _update(job, step=f"{role}: prompt written by gpt-image-2 director skill")
                 if not img_prompt:
-                    img_prompt = (_identity_image_prompt(role, studio) +
+                    img_prompt = (_identity_image_prompt(role, studio, reel_profile) +
                                   " Keep the person's face, hair and likeness exactly as in the reference image.")
                 gen = await mcp_client.generate(
                     "image",
@@ -1390,18 +2130,14 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                 dest = img_dir / f"{role}.png"
                 await _download(gen["url"], dest)
 
-                # AUTO-LOCK: persist the generated studio image as the permanent
-                # identity so it is NEVER generated or re-uploaded again. We copy
-                # the PNG into the identity_cache and register it once to get a
-                # durable, reusable media ref (exactly what lock_character_image.py
-                # does, but automatic). Every future scene/run reuses this ref —
-                # zero generation, zero media_upload of the raw photo.
+                # AUTO-LOCK this look: persist under (role, profile) so this exact
+                # look is never regenerated; a different reel/profile makes its own.
                 import shutil as _sh
-                cache_png = IDENTITY_CACHE_DIR / f"{role}.png"
+                cache_png = IDENTITY_CACHE_DIR / f"{_cache_stem(role, pkey)}.png"
                 _sh.copyfile(dest, cache_png)
                 locked_ref = gen.get("ref")
                 try:
-                    _update(job, step=f"Locking {role} identity image (one-time, reused free afterwards)")
+                    _update(job, step=f"Locking {role} identity image for this look (reused free afterwards)")
                     reg = await mcp_client.register_local_image(cache_png)
                     if reg.get("ref"):
                         locked_ref = reg["ref"]
@@ -1409,8 +2145,8 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                     logger.warning("auto-lock register failed for %s (using gen ref): %s", role, e)
                 identity_refs[role] = locked_ref
                 if locked_ref:
-                    _identity_cache_save(role, sig, gen["url"], locked_ref, cache_png, locked=True)
-                    _update(job, step=f"{role.title()} identity locked — future reels reuse it for 0 credits")
+                    _identity_cache_save(role, sig, gen["url"], locked_ref, cache_png, locked=True, key=pkey)
+                    _update(job, step=f"{role.title()} identity locked for look '{pkey or 'default'}'")
         elif host_photo and guest_photo:
             for role, photo in (("host", host_photo), ("guest", guest_photo)):
                 _update(job, step=f"Uploading {role} reference photo")
@@ -1452,6 +2188,12 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
         prev_role: str | None = None
         scene_files: list[Path] = []
         force_regen = job.get("force_regen_scenes", False)
+
+        # The two-shot of BOTH people is NO LONGER rendered as a video scene — every
+        # clip in the reel is a single talking head. The 'both' image is still produced
+        # (above), but only to serve as the reel THUMBNAIL (created after the merge).
+        two_shot_scene_number: int | None = None
+
         for scene in scenes_to_do:
             seg = seg_by_index.get(scene.scene_number)
             target_sec = float(seg["duration"]) if seg else (scene.end_second - scene.start_second)
@@ -1491,10 +2233,12 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                 # ESTABLISHING TWO-SHOT: the FIRST clip opens on both people in one
                 # frame (over the opening line's audio), then the reel cuts to single
                 # talking heads. This is the only clip where two people share frame.
-                is_first = bool(scenes_to_do) and scene.scene_number == scenes_to_do[0].scene_number
+                # This scene is the two-shot only if it's the one chosen above
+                # (default: a single middle scene). Everything else is single-person.
                 both_ref = identity_refs.get("both")
                 both_img = img_dir / "both.png"
-                two_shot = bool(get_settings().establishing_two_shot and is_first
+                two_shot = bool(two_shot_scene_number is not None
+                                and scene.scene_number == two_shot_scene_number
                                 and (both_ref or both_img.exists()))
 
                 if two_shot:
@@ -1585,7 +2329,7 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                     audio_files=audio_files,
                     duration=duration,
                     aspect_ratio=s.hf_aspect_ratio,
-                    resolution="720p",
+                    resolution=_norm_video_resolution(s.hf_video_resolution),
                 )
                 await _download(gen["url"], final_clip)  # keep native synced audio; no trim
                 prev_clip = final_clip
@@ -1602,7 +2346,7 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                     "prompt": _scene_video_prompt(scene, studio),
                     "image_url": identity_urls[role],
                     "duration": duration,
-                    "resolution": s.hf_video_resolution,
+                    "resolution": _norm_video_resolution(s.hf_video_resolution),
                     "aspect_ratio": s.hf_aspect_ratio,
                     "camera_fixed": _is_static_camera(scene.camera_movement),
                 })
@@ -1630,17 +2374,121 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
             _merge_with_reel_audio(scene_files, _find_reel_audio(base_dir), merged)
         job["merged_url"] = f"/renders/{render_id}/video/{merged.name}"
 
+        # 5 · thumbnail — the two-shot 'both' image (both people in one frame) is used
+        # ONLY here, as the reel thumbnail; it is never rendered as a video scene.
+        # Falls back to the host image if no 'both' image was produced.
+        try:
+            import shutil as _sh
+            thumb_src = None
+            for cand in (img_dir / "both.png", img_dir / "host.png"):
+                if cand.exists():
+                    thumb_src = cand
+                    break
+            if thumb_src:
+                thumb = base_dir / "thumbnail.png"
+                _sh.copyfile(thumb_src, thumb)
+                job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
+                _update(job, step=(f"Thumbnail saved from the {'two-shot' if thumb_src.name == 'both.png' else 'host'} "
+                                   f"image ({thumb.name})"))
+            else:
+                _update(job, step="No image available for a thumbnail (skipped).")
+        except Exception as e:  # noqa: BLE001 — thumbnail must never fail the reel
+            logger.warning("thumbnail generation failed: %s", e)
+
+        # 6 · GDrive upload — push ALL of this reel's raw clips to GDrive in ONE rclone
+        # command (the same rclone remote the editing Routines read), only after every
+        # clip is done. Nothing is uploaded one-by-one during generation.
+        if get_settings().upload_to_gdrive:
+            remote = (get_settings().rclone_remote or "").strip()
+            if not remote:
+                _update(job, step="GDrive upload is ON but RCLONE_REMOTE is empty — skipped.")
+            else:
+                what = (get_settings().gdrive_upload_what or "scenes").lower()
+                prefix = get_settings().gdrive_clip_prefix or "RawClip"
+                # (source_path, dest_name) pairs. Raw clips are renamed sequentially in
+                # SCENE ORDER -> RawClip1, RawClip2, ... so the editing Routine merges
+                # them in order. The merged reel / thumbnail keep their own names.
+                items: list[tuple[Path, str]] = []
+                ordered_scenes = sorted(vid_dir.glob("scene_*.mp4"))
+                if what in ("scenes", "all"):
+                    for i, clip in enumerate(ordered_scenes, start=1):
+                        items.append((clip, f"{prefix}{i}{clip.suffix}"))
+                if what in ("reel", "all") and merged.exists():
+                    items.append((merged, merged.name))
+                if what == "all":
+                    _thumb = base_dir / "thumbnail.png"
+                    if _thumb.exists():
+                        items.append((_thumb, _thumb.name))
+                dest = remote
+                _update(job, step=(f"Uploading {len(items)} file(s) to GDrive in one batch → {dest} "
+                                   f"(clips named {prefix}1..{prefix}{len(ordered_scenes)})"))
+                ok, log = await _rclone_upload_all(items, dest, rclone_exe=get_settings().rclone_exe)
+                job["gdrive_upload"] = {"status": "ok" if ok else "failed", "dest": dest,
+                                        "files": [n for _, n in items], "log": log[-600:]}
+                if ok:
+                    _update(job, step=f"Uploaded {len(items)} file(s) to GDrive ({dest}).")
+                    if get_settings().gdrive_delete_local_after_upload:
+                        removed = 0
+                        for src, _name in items:
+                            try:
+                                src.unlink(); removed += 1
+                            except Exception:  # noqa: BLE001
+                                pass
+                        _update(job, step=f"Removed {removed} local file(s) after confirmed upload.")
+                else:
+                    # Don't fail the whole render — clips are still on disk as a fallback.
+                    _update(job, step=f"GDrive upload FAILED — clips kept locally. rclone says: {log[-300:]}")
+
         _update(job, status="completed", step="Done")
     except Exception as e:  # noqa: BLE001 — job must capture any failure
         logger.exception("Video job %s failed", job_id)
         _update(job, status="failed", step="Failed", error=str(e))
 
 
+async def _rclone_upload_all(items: list[tuple[Path, str]], dest: str, *,
+                             rclone_exe: str = "rclone") -> tuple[bool, str]:
+    """Upload files to the rclone destination in ONE command (not one at a time).
+    `items` is a list of (source_path, dest_name) pairs — each file is staged FLAT
+    under its dest_name, so they land directly in `dest` with the names we choose
+    (e.g. RawClip1.mp4, RawClip2.mp4 in order). Returns (ok, log)."""
+    import shutil, tempfile
+    items = [(Path(s), n) for (s, n) in items if s and Path(s).exists()]
+    if not items:
+        return False, "no files to upload"
+    stage = Path(tempfile.mkdtemp(prefix="rclone_stage_"))
+    try:
+        for src, name in items:
+            shutil.copy2(src, stage / name)   # flat, renamed
+        cmd = [rclone_exe, "copy", str(stage), dest,
+               "--transfers", "8", "--checkers", "8",
+               "--drive-chunk-size", "64M", "--no-traverse", "-v"]
+        env = os.environ.copy()
+        _cfg = (get_settings().rclone_config or "").strip()
+        if _cfg:
+            env["RCLONE_CONFIG"] = _cfg   # pin the exact rclone.conf for this subprocess
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env)
+        out, _ = await proc.communicate()
+        log = (out or b"").decode("utf-8", "replace")[-4000:]
+        return proc.returncode == 0, (log or f"rclone exit {proc.returncode}")
+    except FileNotFoundError:
+        return False, (f"rclone executable not found ('{rclone_exe}'). Install rclone or set "
+                       f"RCLONE_EXE to its full path.")
+    except Exception as e:  # noqa: BLE001
+        return False, f"rclone failed to launch: {e}"
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def clear_identity_cache(role: str | None = None) -> list[str]:
     cleared = []
     roles = [role] if role else ["host", "guest", "both"]
     for r in roles:
-        for f in (IDENTITY_CACHE_DIR / f"{r}.json", IDENTITY_CACHE_DIR / f"{r}.png"):
+        # the legacy single-look files AND every per-profile look (role__profile.*)
+        targets = [IDENTITY_CACHE_DIR / f"{r}.json", IDENTITY_CACHE_DIR / f"{r}.png"]
+        targets += list(IDENTITY_CACHE_DIR.glob(f"{r}__*.json"))
+        targets += list(IDENTITY_CACHE_DIR.glob(f"{r}__*.png"))
+        for f in targets:
             if f.exists():
                 f.unlink(); cleared.append(f.name)
     return cleared
@@ -1649,8 +2497,20 @@ def clear_identity_cache(role: str | None = None) -> list[str]:
 def identity_cache_status() -> dict:
     out = {}
     for r in ("host", "guest", "both"):
-        meta = IDENTITY_CACHE_DIR / f"{r}.json"
-        out[r] = json.loads(meta.read_text(encoding="utf-8")).get("ref") if meta.exists() else None
+        looks = {}
+        legacy = IDENTITY_CACHE_DIR / f"{r}.json"
+        if legacy.exists():
+            try:
+                looks["default"] = json.loads(legacy.read_text(encoding="utf-8")).get("ref")
+            except Exception:  # noqa: BLE001
+                pass
+        for meta in IDENTITY_CACHE_DIR.glob(f"{r}__*.json"):
+            look = meta.stem.split("__", 1)[1]
+            try:
+                looks[look] = json.loads(meta.read_text(encoding="utf-8")).get("ref")
+            except Exception:  # noqa: BLE001
+                pass
+        out[r] = looks or None
     return out
 
 

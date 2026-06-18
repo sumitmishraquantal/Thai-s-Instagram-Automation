@@ -33,6 +33,24 @@
 #     chain_scenes: bool = True   # scene N+1 starts from scene N's last frame (continuous motion)
 #     reaction_shots_enabled: bool = True   # cut to the listener reacting during long turns
 #     reaction_min_seconds: float = 7.0     # add a listener reaction shot for segments at least this long
+#     use_director_skills: bool = True      # use the gpt-image-2 / seedance director skills to write prompts
+#     seedance_bilingual_prompt: bool = False  # also include the native ZH rewrite in the seedance prompt
+#     establishing_two_shot: bool = True    # generate the 'both' two-shot image FOR THE THUMBNAIL (never shown as a scene)
+#     two_shot_position: str = "none"        # DEPRECATED: the two-shot is no longer rendered as a video scene
+#     vary_across_reels: bool = True        # change poster/decor/wardrobe between reels (consistent within a reel)
+#     variation_profile: str = "auto"       # "auto" rotates each reel | a profile id to pin | "none" to disable
+
+#     # ── GDrive upload (via the SAME rclone you use for the editing Routines) ──
+#     # When a reel finishes, push ALL its raw scene clips to GDrive in ONE rclone
+#     # command (not one-by-one) so the editing Routine picks up the complete set.
+#     upload_to_gdrive: bool = True         # master switch — push finished clips to GDrive
+#     rclone_remote: str = "gdrive:reel-projects/TEST"  # destination (remote:path); clips land here
+#     rclone_exe: str = "rclone"            # path to rclone.exe if it isn't on PATH
+#     rclone_config: str = ""   # full path to rclone.conf; "" = let rclone use its default
+#     gdrive_upload_what: str = "scenes"    # "scenes" (raw clips) | "reel" (merged) | "all" (clips+reel+thumbnail)
+#     gdrive_clip_prefix: str = "RawClip"   # raw clips are renamed <prefix>1, <prefix>2 ... in scene order
+#     gdrive_subfolder_per_reel: bool = False  # false = straight into rclone_remote; true = a per-reel subfolder
+#     gdrive_delete_local_after_upload: bool = False  # true = remove the local clips once the upload is confirmed
 
 #     # ── Approval workflow ──
 #     owner_emails: str = ""                       # comma-separated: a@x.com,b@y.com
@@ -59,7 +77,7 @@
 #     hf_image_model: str = "higgsfield-ai/soul/standard"        # text-to-image fallback
 #     hf_image_ref_model: str = "higgsfield-ai/soul/reference"   # 1 reference image -> styled image
 #     hf_video_model: str = "bytedance/seedance/v1/lite/image-to-video"
-#     hf_video_resolution: str = "720"   # seedance: "480" | "720" | "1080"
+#     hf_video_resolution: str = "1080p"  # seedance allowed: "480p" | "720p" | "1080p" (the 'p' is REQUIRED)
 #     hf_image_resolution: str = "1080p" # soul/reference: "720p" | "1080p"
 #     hf_aspect_ratio: str = "9:16"
 
@@ -82,6 +100,7 @@
 # @lru_cache
 # def get_settings() -> Settings:
 #     return Settings()
+
 
 from functools import lru_cache
 from pydantic_settings import BaseSettings
@@ -120,7 +139,22 @@ class Settings(BaseSettings):
     reaction_min_seconds: float = 7.0     # add a listener reaction shot for segments at least this long
     use_director_skills: bool = True      # use the gpt-image-2 / seedance director skills to write prompts
     seedance_bilingual_prompt: bool = False  # also include the native ZH rewrite in the seedance prompt
-    establishing_two_shot: bool = True    # open the reel with a two-shot of both people, then single talking heads
+    establishing_two_shot: bool = True    # generate the 'both' two-shot image FOR THE THUMBNAIL (never shown as a scene)
+    two_shot_position: str = "none"        # DEPRECATED: the two-shot is no longer rendered as a video scene
+    vary_across_reels: bool = True        # change poster/decor/wardrobe between reels (consistent within a reel)
+    variation_profile: str = "auto"       # "auto" rotates each reel | a profile id to pin | "none" to disable
+
+    # ── GDrive upload (via the SAME rclone you use for the editing Routines) ──
+    # When a reel finishes, push ALL its raw scene clips to GDrive in ONE rclone
+    # command (not one-by-one) so the editing Routine picks up the complete set.
+    upload_to_gdrive: bool = True         # master switch — push finished clips to GDrive
+    rclone_remote: str = "gdrive:reel-projects/TEST"  # destination (remote:path); clips land here
+    rclone_exe: str = "rclone"            # path to rclone.exe if it isn't on PATH
+    rclone_config: str = ""               # full path to rclone.conf; "" = let rclone use its default location
+    gdrive_upload_what: str = "scenes"    # "scenes" (raw clips) | "reel" (merged) | "all" (clips+reel+thumbnail)
+    gdrive_clip_prefix: str = "RawClip"   # raw clips are renamed <prefix>1, <prefix>2 ... in scene order
+    gdrive_subfolder_per_reel: bool = False  # false = straight into rclone_remote; true = a per-reel subfolder
+    gdrive_delete_local_after_upload: bool = False  # true = remove the local clips once the upload is confirmed
 
     # ── Approval workflow ──
     owner_emails: str = ""                       # comma-separated: a@x.com,b@y.com
@@ -147,8 +181,9 @@ class Settings(BaseSettings):
     hf_image_model: str = "higgsfield-ai/soul/standard"        # text-to-image fallback
     hf_image_ref_model: str = "higgsfield-ai/soul/reference"   # 1 reference image -> styled image
     hf_video_model: str = "bytedance/seedance/v1/lite/image-to-video"
-    hf_video_resolution: str = "720"   # seedance: "480" | "720" | "1080"
+    hf_video_resolution: str = "1080p"  # seedance allowed: "480p" | "720p" | "1080p" (the 'p' is REQUIRED)
     hf_image_resolution: str = "1080p" # soul/reference: "720p" | "1080p"
+    hf_image_quality: str = "high"     # gpt_image_2 quality: "low" | "medium" | "high" (never leave unset → it defaults to low)
     hf_aspect_ratio: str = "9:16"
 
     anthropic_model: str = "claude-sonnet-4-5"
