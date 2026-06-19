@@ -422,10 +422,26 @@ def _thumbnail_prompt(headline: str, hook: str) -> str:
     )
 
 
+def _resolve_thumbnail_reference() -> tuple[Path | None, str]:
+    """Pick a reference portrait from assets only (never renders/).
+
+    Prefers locked studio identity images in identity_cache/, then raw photos in
+    characters/. Returns (path, label) for job logging.
+    """
+    for role in ("host", "both", "guest"):
+        cached = IDENTITY_CACHE_DIR / f"{role}.png"
+        if cached.exists() and cached.stat().st_size > 1000:
+            return cached, f"assets/identity_cache/{role}.png"
+    for role in ("host", "both", "guest"):
+        photo = _character_path(role)
+        if photo:
+            return photo, f"assets/characters/{photo.name}"
+    return None, ""
+
+
 async def _generate_reel_thumbnail(
     *,
     base_dir: Path,
-    img_dir: Path,
     blueprint: SceneBlueprint,
     use_mcp: bool,
     mcp_client: higgsfield_mcp.HiggsfieldMCP | None,
@@ -442,13 +458,10 @@ async def _generate_reel_thumbnail(
         _update(job, step="Thumbnail already exists — reusing (0 credits)")
         return thumb
 
-    ref_png: Path | None = None
-    for cand in (img_dir / "host.png", img_dir / "both.png", img_dir / "guest.png"):
-        if cand.exists():
-            ref_png = cand
-            break
+    ref_png, ref_label = _resolve_thumbnail_reference()
     if not ref_png:
         return None
+    _update(job, step=f"Thumbnail reference: {ref_label}")
 
     headline, hook = _load_thumbnail_text(base_dir, blueprint)
     prompt = _thumbnail_prompt(headline, hook)
@@ -479,14 +492,14 @@ async def _generate_reel_thumbnail(
     return thumb
 
 
-def _fallback_thumbnail_copy(base_dir: Path, img_dir: Path) -> Path | None:
-    """Last resort: copy identity image when Higgsfield thumbnail gen fails."""
+def _fallback_thumbnail_copy(base_dir: Path) -> Path | None:
+    """Last resort: copy an assets identity image when Higgsfield thumbnail gen fails."""
     import shutil as _sh
-    for cand in (img_dir / "both.png", img_dir / "host.png"):
-        if cand.exists():
-            thumb = base_dir / "thumbnail.png"
-            _sh.copyfile(cand, thumb)
-            return thumb
+    ref_png, _ = _resolve_thumbnail_reference()
+    if ref_png:
+        thumb = base_dir / "thumbnail.png"
+        _sh.copyfile(ref_png, thumb)
+        return thumb
     return None
 
 
@@ -1044,14 +1057,13 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
         try:
             thumb = await _generate_reel_thumbnail(
                 base_dir=base_dir,
-                img_dir=img_dir,
                 blueprint=blueprint,
                 use_mcp=use_mcp,
                 mcp_client=mcp_client,
                 job=job,
             )
             if not thumb:
-                thumb = _fallback_thumbnail_copy(base_dir, img_dir)
+                thumb = _fallback_thumbnail_copy(base_dir)
                 if thumb:
                     _update(job, step=f"Thumbnail fallback — copied identity image ({thumb.name})")
             if thumb:
@@ -1061,7 +1073,7 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
         except Exception as e:  # noqa: BLE001 — thumbnail must never fail the reel
             logger.warning("thumbnail generation failed: %s", e)
             try:
-                thumb = _fallback_thumbnail_copy(base_dir, img_dir)
+                thumb = _fallback_thumbnail_copy(base_dir)
                 if thumb:
                     job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
                     _update(job, step=f"Thumbnail fallback after error — copied identity image")
