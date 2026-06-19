@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Smoke-test GDrive upload without running the full reel pipeline.
 
-Uses the same rclone batch upload as higgsfield_video.py (scene clips only).
+Uses the same rclone batch upload as higgsfield_video.py (scene clips + thumbnail).
 
 Usage (from backend/):
     python test_gdrive_upload.py              # upload hardcoded dummy clips

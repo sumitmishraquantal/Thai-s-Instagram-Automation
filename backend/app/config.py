@@ -42,14 +42,16 @@ class Settings(BaseSettings):
     seedance_bilingual_prompt: bool = False
     establishing_two_shot: bool = True
 
-    # GDrive upload (via rclone) — raw Higgsfield scene clips only (scene_01.mp4, …)
+    # GDrive upload (via rclone) — Higgsfield scene clips + generated thumbnail
     upload_to_gdrive: bool = True
     rclone_remote: str = "gdrive:reel-projects/TEST"
     rclone_exe: str = "rclone"
     rclone_config: str = ""
     gdrive_clip_prefix: str = "RawClip"
+    gdrive_thumbnail_name: str = "Thumbnail.png"
     gdrive_subfolder_per_reel: bool = False
     gdrive_delete_local_after_upload: bool = False
+    generate_reel_thumbnail: bool = True
 
     # Approval workflow (pause before video generation)
     owner_emails: str = ""

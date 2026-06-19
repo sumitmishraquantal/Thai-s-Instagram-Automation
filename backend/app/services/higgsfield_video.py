@@ -16,7 +16,7 @@ Consistency strategy under these constraints:
      mouth motion is prompt-driven "speaking" animation).
 
 Outputs in backend/renders/<render_id>/: images/host.png, images/guest.png,
-video/scene_XX.mp4, video/merged_reel.mp4
+video/scene_XX.mp4, video/merged_reel.mp4, thumbnail.png
 """
 import asyncio
 import json
@@ -379,6 +379,115 @@ def _image_enforcement(role: str) -> str:
         "watermark, no logos. Render as a real photograph (natural skin texture, visible pores, catchlights), "
         "NOT a 3D render, NOT illustration, NOT anime."
     )
+
+
+def _load_thumbnail_text(base_dir: Path, blueprint: SceneBlueprint) -> tuple[str, str]:
+    """Return (headline, hook) for the thumbnail text overlay."""
+    hook = ""
+    for script_path in base_dir.glob("*.script.json"):
+        try:
+            data = json.loads(script_path.read_text(encoding="utf-8"))
+            for line in data.get("lines", []):
+                if str(line.get("speaker", "")).upper() == "HOST":
+                    hook = (line.get("text") or "").strip()
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        if hook:
+            break
+    headline = (blueprint.title or "Podcast").strip()
+    return headline, hook
+
+
+def _thumbnail_prompt(headline: str, hook: str) -> str:
+    """Prompt for a podcast-style Reel cover with bold typography (reference style)."""
+    display = hook if hook else headline
+    if hook and headline and hook.lower() != headline.lower() and len(headline) <= 60:
+        display = f"{hook}\n{headline.upper()}"
+    display = display[:220].strip()
+    return (
+        "Professional Instagram Reel / YouTube Shorts VERTICAL thumbnail cover, 9:16 aspect ratio. "
+        "High-production podcast-style graphic design with bold, eye-catching typography overlay. "
+        "Faithfully preserve the EXACT person's face, hair, beard and appearance from the reference "
+        "photo — show them in a close-up portrait on the left third of the frame, speaking into a black "
+        f"podcast microphone on a boom arm, in {_STUDIO_SHORT}. "
+        "Dark moody cinematic background with high contrast and warm accent lighting. "
+        f"Large bold distressed sans-serif text overlay prominently displaying this exact text:\n"
+        f"\"{display}\"\n"
+        "Typography style: mix bright yellow (#FFD700) for key emphasis words, white for secondary "
+        "text, and bold red OR neon green for the most provocative keyword — textured, high-impact "
+        "podcast YouTube thumbnail lettering. Optional small minimalist yellow line-art icons along "
+        "the bottom edge. No watermark, no play-button icon. Vertical 9:16, sharp readable text, "
+        "photorealistic portrait of the reference person."
+    )
+
+
+async def _generate_reel_thumbnail(
+    *,
+    base_dir: Path,
+    img_dir: Path,
+    blueprint: SceneBlueprint,
+    use_mcp: bool,
+    mcp_client: higgsfield_mcp.HiggsfieldMCP | None,
+    job: dict,
+) -> Path | None:
+    """Generate a styled Reel thumbnail via Higgsfield. Returns path or None."""
+    s = get_settings()
+    if not s.generate_reel_thumbnail:
+        return None
+
+    thumb = base_dir / "thumbnail.png"
+    if (thumb.exists() and thumb.stat().st_size > 5000
+            and not job.get("force_regen_scenes")):
+        _update(job, step="Thumbnail already exists — reusing (0 credits)")
+        return thumb
+
+    ref_png: Path | None = None
+    for cand in (img_dir / "host.png", img_dir / "both.png", img_dir / "guest.png"):
+        if cand.exists():
+            ref_png = cand
+            break
+    if not ref_png:
+        return None
+
+    headline, hook = _load_thumbnail_text(base_dir, blueprint)
+    prompt = _thumbnail_prompt(headline, hook)
+
+    if use_mcp and mcp_client:
+        _update(job, step="Generating reel thumbnail (GPT Image 2 via Higgsfield)")
+        gen = await mcp_client.generate(
+            "image",
+            prompt=prompt,
+            model_hint="gpt_image_2",
+            image_files=[ref_png],
+            aspect_ratio=s.hf_aspect_ratio,
+            resolution="2k",
+        )
+        await _download(gen["url"], thumb)
+        return thumb
+
+    _update(job, step="Generating reel thumbnail (Soul Reference via Higgsfield)")
+    ref_url = await _hf_upload(ref_png)
+    res = await _hf_subscribe(s.hf_image_ref_model, {
+        "prompt": prompt,
+        "image_reference_url": ref_url,
+        "aspect_ratio": s.hf_aspect_ratio,
+        "resolution": s.hf_image_resolution,
+        "enhance_prompt": False,
+    })
+    await _download(_first_url(res), thumb)
+    return thumb
+
+
+def _fallback_thumbnail_copy(base_dir: Path, img_dir: Path) -> Path | None:
+    """Last resort: copy identity image when Higgsfield thumbnail gen fails."""
+    import shutil as _sh
+    for cand in (img_dir / "both.png", img_dir / "host.png"):
+        if cand.exists():
+            thumb = base_dir / "thumbnail.png"
+            _sh.copyfile(cand, thumb)
+            return thumb
+    return None
 
 
 def _video_concept_brief(scene: Scene, speaker: str, listener: str,
@@ -931,26 +1040,35 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
             _merge_with_reel_audio(scene_files, _find_reel_audio(base_dir), merged)
         job["merged_url"] = f"/renders/{render_id}/video/{merged.name}"
 
-        # 5 · thumbnail — two-shot image for the reel cover (never a video scene)
+        # 5 · thumbnail — styled Reel cover via Higgsfield (fallback: copy identity image)
         try:
-            import shutil as _sh
-            thumb_src = None
-            for cand in (img_dir / "both.png", img_dir / "host.png"):
-                if cand.exists():
-                    thumb_src = cand
-                    break
-            if thumb_src:
-                thumb = base_dir / "thumbnail.png"
-                _sh.copyfile(thumb_src, thumb)
+            thumb = await _generate_reel_thumbnail(
+                base_dir=base_dir,
+                img_dir=img_dir,
+                blueprint=blueprint,
+                use_mcp=use_mcp,
+                mcp_client=mcp_client,
+                job=job,
+            )
+            if not thumb:
+                thumb = _fallback_thumbnail_copy(base_dir, img_dir)
+                if thumb:
+                    _update(job, step=f"Thumbnail fallback — copied identity image ({thumb.name})")
+            if thumb:
                 job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
-                _update(job, step=(f"Thumbnail saved from the {'two-shot' if thumb_src.name == 'both.png' else 'host'} "
-                                   f"image ({thumb.name})"))
             else:
                 _update(job, step="No image available for a thumbnail (skipped).")
         except Exception as e:  # noqa: BLE001 — thumbnail must never fail the reel
             logger.warning("thumbnail generation failed: %s", e)
+            try:
+                thumb = _fallback_thumbnail_copy(base_dir, img_dir)
+                if thumb:
+                    job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
+                    _update(job, step=f"Thumbnail fallback after error — copied identity image")
+            except Exception:  # noqa: BLE001
+                pass
 
-        # 6 · GDrive upload — raw scene clips only (no merged reel, thumbnail, or audio)
+        # 6 · GDrive upload — scene clips + generated thumbnail (no merged reel or audio)
         if get_settings().upload_to_gdrive:
             remote = (get_settings().rclone_remote or "").strip()
             if not remote:
@@ -962,17 +1080,23 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                     (clip, f"{prefix}{i}{clip.suffix}")
                     for i, clip in enumerate(ordered_scenes, start=1)
                 ]
+                thumb_path = base_dir / "thumbnail.png"
+                thumb_name = (get_settings().gdrive_thumbnail_name or "Thumbnail.png").strip()
+                if thumb_path.exists() and thumb_name:
+                    items.append((thumb_path, thumb_name))
                 if not items:
-                    _update(job, step="GDrive upload skipped — no scene clips found.")
+                    _update(job, step="GDrive upload skipped — no scene clips or thumbnail found.")
                 else:
                     dest = remote
-                    _update(job, step=(f"Uploading {len(items)} scene clip(s) to GDrive → {dest} "
-                                       f"({prefix}1..{prefix}{len(items)})"))
+                    clip_count = len(ordered_scenes)
+                    thumb_note = f" + {thumb_name}" if thumb_path.exists() and thumb_name else ""
+                    _update(job, step=(f"Uploading {clip_count} scene clip(s){thumb_note} to GDrive → {dest} "
+                                       f"({prefix}1..{prefix}{clip_count})"))
                     ok, log = await _rclone_upload_all(items, dest, rclone_exe=get_settings().rclone_exe)
                     job["gdrive_upload"] = {"status": "ok" if ok else "failed", "dest": dest,
                                             "files": [n for _, n in items], "log": log[-600:]}
                     if ok:
-                        _update(job, step=f"Uploaded {len(items)} scene clip(s) to GDrive ({dest}).")
+                        _update(job, step=f"Uploaded {len(items)} file(s) to GDrive ({dest}).")
                         if get_settings().gdrive_delete_local_after_upload:
                             removed = 0
                             for src, _name in items:
