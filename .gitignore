@@ -11,3 +11,15 @@ backend/app/assets/approvals.json
 
 /venv/
 .venv/
+
+# --- added: keep personal data & runtime state out of the repo ---
+backend/assets/characters/*.png
+backend/assets/characters/*.jpg
+backend/assets/characters/*.jpeg
+backend/assets/characters/*.webp
+backend/assets/characters/*.heic
+backend/assets/hf_media_uploads.json
+backend/app/assets/sent_emails/
+backend/.rclone_upload_*.txt
+*.log
+.DS_Store

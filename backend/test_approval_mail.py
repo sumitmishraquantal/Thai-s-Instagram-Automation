@@ -73,18 +73,15 @@ def _sync_render_folder(
     if script_file is not None:
         dest_name = script_file.name if script_file.name.endswith(".script.json") else "test.script.json"
         shutil.copy2(script_file, base / dest_name)
+    # Optional: blueprint.json / segments.json enable the per-clip Regenerate flow.
+    for extra in ("blueprint.json", "segments.json"):
+        src = FIXTURE_DIR / extra
+        if src.is_file():
+            shutil.copy2(src, base / extra)
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
-
-    fixture_dir = FIXTURE_DIR.resolve()
-    clips, thumbnail, script_file = scan_fixture_media(fixture_dir)
-
-    if not clips:
-        print(f"No .mp4 files in {fixture_dir}", file=sys.stderr)
-        print("Add scene clips there, e.g. scene_01.mp4, scene_02.mp4", file=sys.stderr)
-        return 1
 
     s = get_settings()
     owners = [o.strip() for o in s.owner_emails.split(",") if o.strip()]
@@ -92,14 +89,42 @@ def main() -> int:
         print("Set OWNER_EMAILS in .env", file=sys.stderr)
         return 1
 
-    _sync_render_folder(clips, thumbnail, script_file)
-    payload = approval_gate.build_approval_payload(TEST_RENDER_ID)
-    if payload.get("title") in (TEST_RENDER_ID, "", None):
+    # Optional: target an EXISTING real render by id (it already has clips, thumbnail,
+    # script, blueprint.json AND segments.json — so the per-clip Regenerate works for
+    # real). Usage:  python test_approval_mail.py 2cc36edffa
+    arg_render_id = sys.argv[1] if len(sys.argv) > 1 else None
+    if arg_render_id:
+        render_id = arg_render_id
+        base = RENDERS_DIR / render_id
+        if not base.is_dir():
+            print(f"No render folder at {base}", file=sys.stderr)
+            return 1
+        if not (base / "video").is_dir() or not list((base / "video").glob("scene_*.mp4")):
+            print(f"No scene clips under {base / 'video'}", file=sys.stderr)
+            return 1
+        print(f"Targeting existing render: {render_id}")
+        if (base / "segments.json").exists() and (base / "blueprint.json").exists():
+            print("  has segments.json + blueprint.json — per-clip Regenerate will work for real.")
+        else:
+            print("  WARNING: missing segments.json/blueprint.json — Regenerate will refuse for this render.")
+    else:
+        fixture_dir = FIXTURE_DIR.resolve()
+        clips, thumbnail, script_file = scan_fixture_media(fixture_dir)
+        if not clips:
+            print(f"No .mp4 files in {fixture_dir}", file=sys.stderr)
+            print("Add scene clips there, e.g. scene_01.mp4, scene_02.mp4", file=sys.stderr)
+            print("Or target a real render:  python test_approval_mail.py <render_id>", file=sys.stderr)
+            return 1
+        _sync_render_folder(clips, thumbnail, script_file)
+        render_id = TEST_RENDER_ID
+
+    payload = approval_gate.build_approval_payload(render_id)
+    if payload.get("title") in (render_id, "", None):
         payload["title"] = "Approval mail test reel"
 
     record = approvals.create_request(
         workflow="publish",
-        render_id=TEST_RENDER_ID,
+        render_id=render_id,
         owners=owners,
         payload=payload,
     )
@@ -109,10 +134,11 @@ def main() -> int:
 
     approvals.register_resume(record["id"], _resume)
 
+    n_clips = len(payload.get("scene_clips", []))
     script_note = f", {len(payload.get('script_lines', []))} script line(s)" if payload.get("script_lines") else ""
-    print(f"Found {len(clips)} clip(s)" + (f" + thumbnail ({thumbnail.name})" if thumbnail else "") + script_note)
+    print(f"Render {render_id}: {n_clips} clip(s)" + script_note)
     if not payload.get("script_lines"):
-        print("Tip: add script.json to test_fixtures/approval_mail/ to include the script in the email.")
+        print("Tip: add a *.script.json to the render folder to include the script in the email.")
     print(f"Approval id: {record['id']}")
     print(f"Approve/decline base URL: {s.approval_base_url}")
 
