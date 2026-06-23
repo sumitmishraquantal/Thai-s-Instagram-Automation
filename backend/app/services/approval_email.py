@@ -24,10 +24,13 @@ def _approval_html(*, record: dict, base_url: str) -> str:
 
     thumb_block = ""
     if thumbnail_url:
-        thumb_block = (
-            f'<img src="{thumbnail_url}" alt="Thumbnail" '
-            f'style="width:100%;max-width:360px;border-radius:10px;border:1px solid #e5e7eb;margin:0 0 16px" />'
-        )
+        thumb_block = f"""
+    <div style="margin:0 0 14px;padding:12px;background:#f9fafb;border-radius:8px;border:1px solid #e5e7eb">
+      <p style="margin:0 0 8px;font-weight:700;color:#111">Thumbnail</p>
+      <p style="margin:0">
+        <a href="{thumbnail_url}" style="color:#2563eb;font-weight:600">▶ Open thumbnail in browser</a>
+      </p>
+    </div>"""
 
     clip_rows = ""
     for clip in scene_clips:
@@ -50,7 +53,7 @@ def _approval_html(*, record: dict, base_url: str) -> str:
     {thumb_block}
     {clip_rows}
     <p style="color:#888;font-size:12px;margin:0 0 6px">
-      If clips do not play in your mail client, use the browser links above.
+      Open thumbnail and clips in your browser to review them.
     </p>"""
 
     script_rows = ""
