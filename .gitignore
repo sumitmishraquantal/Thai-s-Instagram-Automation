@@ -10,3 +10,4 @@ backend/app/assets/approvals.json
 .pytest_cache/
 
 /venv/
+.venv/
