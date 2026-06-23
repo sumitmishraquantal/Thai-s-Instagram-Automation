@@ -1,0 +1,34 @@
+{
+  "f8c2968c22b1b6feb736d88ef8c15285fe4e710efe7d5aeeddc4c3531d3ea69a": {
+    "media_id": "7f50c636-661a-4be0-b59a-435f73bfc805",
+    "name": "host.png"
+  },
+  "cc396fb5fe5e535cbcd4e53189a58c142037bec5bcbfc24964560171cac9c07a": {
+    "media_id": "d2721ff1-5726-4f4d-bdc9-c4d6abf88741",
+    "name": "host.png"
+  },
+  "f0960bf6437e4cbe159d0aa94c148ece9165316faca704e8e9d451e46b013693": {
+    "media_id": "776f92ce-f550-4c63-90ad-abbdd2eaedfe",
+    "name": "guest.png"
+  },
+  "0b3a0f21b2b2e0381274e2c5d133927239645a075c5a4c6699e022ffd304a747": {
+    "media_id": "71dd5584-f752-4606-b147-d375f5560170",
+    "name": "guest.png"
+  },
+  "c36819c3c0561ce6bcd8a593bfd0183e41b45224ebb20cbe2c86afb69845eeb9": {
+    "media_id": "53b0ee84-d475-43a3-bca7-d7afb9204bbe",
+    "name": "segment_01.wav"
+  },
+  "ef9eeb04ed69ded6083f3ffa7190f25240c266d6dbc2a5927909023217f031e5": {
+    "media_id": "63d04d4f-b31e-49b0-8338-801c1c5a73c7",
+    "name": "segment_02.wav"
+  },
+  "cabc910e09d090a3a979efde5e8fb0293f8383e31bf374a72fd31ed0ccd916eb": {
+    "media_id": "5660323d-73ed-45df-bcfd-0129da178b2c",
+    "name": "segment_03.wav"
+  },
+  "b35eec26c915863e8d464e0633fe77f22375e5c9a8302411d949d02cb04a016b": {
+    "media_id": "e4736c96-cfc0-4158-ae89-cea8cb4f1c07",
+    "name": "segment_04.wav"
+  }
+}
