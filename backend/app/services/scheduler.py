@@ -1,15 +1,11 @@
-"""Cron-style trigger: automatically start a workflow on a schedule.
+"""Cron-style trigger: automatically start the pipeline on a schedule.
 
-Uses APScheduler with a standard cron expression (e.g. "0 9 * * *" = every day at
-09:00). Configure in backend/.env:
+Configure in backend/.env:
 
     SCHEDULE_ENABLED=true
     SCHEDULE_CRON=0 9 * * *
     SCHEDULE_WORKFLOW=podcast
-    SCHEDULE_TOPIC=                # optional; blank = let the research agent pick
-
-The trigger calls a registered runner function (wired in main.py) that kicks off
-the chosen workflow exactly as the UI would.
+    SCHEDULE_TOPIC=                # optional category override; blank = auto-pick
 """
 import logging
 from typing import Callable
@@ -26,7 +22,7 @@ _runner: Callable[[str, str], None] | None = None
 
 
 def register_runner(fn: Callable[[str, str], None]):
-    """fn(workflow, topic) starts a workflow run. Registered by main.py."""
+    """fn(workflow, topic) starts a pipeline run. Registered by main.py."""
     global _runner
     _runner = fn
 
@@ -45,8 +41,7 @@ def _fire():
 
 
 def start_scheduler():
-    """Start the background scheduler if enabled in settings. Safe to call once
-    at app startup."""
+    """Start the background scheduler if enabled in settings."""
     global _scheduler
     s = get_settings()
     if not s.schedule_enabled or not s.schedule_cron.strip():

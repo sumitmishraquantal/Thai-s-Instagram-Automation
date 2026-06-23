@@ -1,79 +1,146 @@
-# Reel Studio — AI Podcast Shorts: Script & Voice Studio
+# Reel Studio — Automated Instagram Reel Pipeline
 
-Page 1 of the Instagram automation pipeline: trending-topic research, 45–50s
-podcast-style (Q&A) script generation, ElevenLabs host/guest voice mapping,
-and in-browser voice preview.
+Backend-only automation for podcast-style Instagram Reels: live research from
+YouTube + Serper, Groq picks category and topic, generates a 30–35s Q&A script,
+synthesizes host/guest voices via ElevenLabs, renders and splits audio, builds a
+scene blueprint, and generates the final video.
 
 ## Stack
-- **Backend** — FastAPI (Python 3.12) · Anthropic API (research + script agents) · ElevenLabs v3 (TTS)
-- **Frontend** — React 18 + Vite, proxied to the backend (`/api/*`)
-- **Deploy** — Docker Compose (nginx serves the built frontend and proxies the API)
 
-## API endpoints
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/health` | Health check |
-| POST | `/api/research` | Trending topics for a category (Claude + web search) |
-| POST | `/api/script` | Generate 45–50s Q&A script (auto-retries if out of budget) |
-| GET | `/api/voices` | Live voice list from your ElevenLabs account |
-| POST | `/api/tts-preview` | Per-line TTS with host/guest voice mapping → base64 mp3 clips |
+- **Backend** — FastAPI (Python 3.12) · Groq (LLM) · YouTube Data API v3 + Serper (research) · ElevenLabs v3 (TTS) · Higgsfield/Seedance (video)
+- **Deploy** — Docker Compose (backend on port 8000)
 
----
+## Pipeline flow
 
-## Local development (step by step)
+1. Pick category (`DEFAULT_CATEGORY` env or Groq auto-select)
+2. **Live research** — YouTube (recent popular videos) + Serper (web/news) → Groq distills 5 topics
+3. Groq picks the best topic (`select_best_topic`)
+4. Generate script (`generate_script`)
+5. Synthesize + render audio, split into segments (`render_final_audio`)
+6. Generate scene blueprint (`generate_scene_plan`)
+7. **Approval gate** (if `REQUIRE_APPROVAL=true`) — email owners script + audio; video starts on approve
+8. Generate per-scene video clips and merge (`run_video_job`)
 
-### 1 · Backend
+Output: `backend/renders/<render_id>/video/merged_reel.mp4`
+
+## Setup
+
 ```bash
 cd backend
 python -m venv venv
 # Windows:  venv\Scripts\activate     macOS/Linux:  source venv/bin/activate
 pip install -r requirements.txt
 
-# Add your keys
 copy .env.example .env        # Windows (or: cp .env.example .env)
-# edit backend/.env → ANTHROPIC_API_KEY, ELEVENLABS_API_KEY
-
-uvicorn app.main:app --reload --port 8000
+# Edit backend/.env — at minimum:
+#   GROQ_API_KEY, YOUTUBE_API_KEY, SERPER_API_KEY, ELEVENLABS_API_KEY, HF_API_KEY + HF_API_SECRET
 ```
-Check: http://localhost:8000/api/health → `{"status":"ok"}`
-Interactive docs: http://localhost:8000/docs
 
-### 2 · Frontend (new terminal)
-```bash
-cd frontend
-npm install
-npm run dev
+### Topic research keys
+
+| Env var | Source |
+|---------|--------|
+| `YOUTUBE_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → enable **YouTube Data API v3** → Credentials → API key |
+| `SERPER_API_KEY` | [serper.dev](https://serper.dev/) dashboard |
+
+Optional tuning: `YOUTUBE_REGION_CODE`, `RESEARCH_LOOKBACK_DAYS` (default 30), `SERPER_GL` / `SERPER_HL`.
+
+If both research keys are missing, Groq falls back to model-generated topic suggestions.
+
+### Voice IDs (ElevenLabs)
+
+Set in `.env`:
+
 ```
-Open http://localhost:5173 — Vite proxies all `/api` calls to port 8000, so
-no CORS issues and no key ever reaches the browser.
+HOST_VOICE_ID=CwhRBWXzGAHq8TQ4Fs17
+GUEST_VOICE_ID=RDjgzX0qNSGQZkgo5KTT
+```
 
-### 3 · Smoke test
-1. Pick a category → **Find trending topics** (uses Claude web search — ~10–20s)
-2. Click a topic chip, or type your own idea → **Generate 45–50s reel script**
-3. Confirm the timing strip shows green (within 45–50s)
-4. Pick Host + Guest voices (loaded live from your ElevenLabs account)
-5. **▶ Preview with voices** — lines synthesize and play back in order
+### Character photos
 
----
+Place reference images in `backend/assets/characters/`:
 
-## Production deploy (Docker)
+- `host.png` (or `.jpg`)
+- `guest.png`
+
+Or lock identities ahead of time with `python lock_charachter_image.py`.
+
+## Run once (CLI)
+
 ```bash
-# from the project root, with backend/.env filled in:
+cd backend
+python run_pipeline.py
+python run_pipeline.py --category "Anxiety"
+```
+
+## Run on a schedule
+
+In `backend/.env`:
+
+```
+SCHEDULE_ENABLED=true
+SCHEDULE_CRON=0 9 * * *
+SCHEDULE_TOPIC=
+```
+
+Start the server (scheduler fires inside the process):
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+## HTTP API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/health` | Health check |
+| POST | `/api/run-pipeline` | Run full pipeline (`{"category": "optional"}`) |
+| GET | `/api/approvals/act` | Owner approve/decline links from email |
+| GET | `/api/approvals/{approval_id}` | Approval status |
+| GET | `/api/video-jobs/{job_id}` | Poll video job status |
+| GET | `/api/schedule` | Cron scheduler status |
+| GET | `/api/characters` | Character photo status |
+| GET | `/api/identity-cache` | Locked identity cache status |
+
+Static outputs are served at `/renders/<render_id>/...`.
+
+### Approval workflow
+
+When `REQUIRE_APPROVAL=true` (default), the pipeline stops after blueprint generation and emails owners with approve/decline links. The email includes the **full script** and **combined audio** link — not the scene blueprint.
+
+Set in `backend/.env`:
+
+```
+REQUIRE_APPROVAL=true
+OWNER_EMAILS=you@example.com,teammate@example.com
+APPROVAL_BASE_URL=http://localhost:8000
+```
+
+For approve links to start video generation, keep the API server running:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Then run the pipeline (CLI or `POST /api/run-pipeline`). On approve, video generation starts automatically. Blueprint is saved to `renders/<render_id>/blueprint.json` so approval works even if the pipeline CLI process has exited.
+
+Set `REQUIRE_APPROVAL=false` to skip the gate and go straight to video generation.
+
+## Docker
+
+```bash
 docker compose up --build -d
 ```
-Open http://localhost:8080. nginx serves the built frontend and proxies
-`/api/*` to the backend container — keys stay server-side.
 
-For a real domain: put this behind your existing reverse proxy / Cloudflare,
-or deploy backend to any container host (Railway, Render, EC2) and the
-frontend `dist/` to any static host, pointing nginx/proxy at the backend URL.
+API: http://localhost:8000/api/health
+
+## Local testing without API cost
+
+Set `LLM_PROVIDER=mock` in `.env` to use canned topics/scripts/blueprints. TTS and
+video steps still require valid ElevenLabs and Higgsfield credentials.
 
 ## Notes
-- **Script budget**: backend validates total seconds and auto-retries once
-  with a correction prompt if the model lands outside 45–50s.
-- **Emotion → voice**: emotion tags map to ElevenLabs v3 audio tags
-  (`[curious]`, `[warm]`, …) in `backend/app/services/elevenlabs_client.py`.
-- **Rate limits**: TTS preview synthesizes max 12 lines with concurrency 3.
-- **Next stages**: the Script Package JSON (`speaker/text/emotion/seconds`)
-  is the canonical format — feed it directly into scene planning, video
-  generation, and QA stages.
+
+- Script duration is validated at **30–35 seconds** in `backend/app/services/llm.py`.
+- All render paths are relative to `backend/` (e.g. `renders/<id>/video/merged_reel.mp4`).
+- Do not commit `backend/.env` — copy from `.env.example` instead.

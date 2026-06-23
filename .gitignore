@@ -1,0 +1,12 @@
+backend/.env
+backend/venv/
+__pycache__/
+*.pyc
+backend/renders/
+backend/test_fixtures/
+backend/assets/hf_mcp_tokens.json
+backend/assets/identity_cache/
+backend/app/assets/approvals.json
+.pytest_cache/
+
+/venv/
