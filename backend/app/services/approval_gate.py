@@ -1,6 +1,7 @@
 """Approval gate after Higgsfield video — owners review the reel, then GDrive upload."""
 import json
 import logging
+from pathlib import Path
 
 from ..config import get_settings
 from ..schemas import SceneBlueprint
@@ -9,18 +10,41 @@ from . import approval_email, approvals, higgsfield_video, render
 logger = logging.getLogger(__name__)
 
 
-def build_approval_payload(render_id: str, blueprint: SceneBlueprint | None = None) -> dict:
-    """What owners review: Higgsfield scene clips + thumbnail (not the merged reel)."""
-    base = render.RENDERS_DIR / render_id
-    title = blueprint.title if blueprint else render_id
+def _load_script_lines(base: Path) -> tuple[str, list[dict]]:
+    """Read title + script lines from *.script.json or segments.json under a render folder."""
+    title = base.name
+    script_lines: list[dict] = []
 
     script_files = list(base.glob("*.script.json"))
     if script_files:
         try:
             data = json.loads(script_files[0].read_text(encoding="utf-8"))
             title = data.get("title", title)
+            script_lines = [
+                {"speaker": line.get("speaker", ""), "text": line.get("text", "")}
+                for line in data.get("lines", [])
+            ]
         except Exception:  # noqa: BLE001
-            pass
+            script_lines = []
+
+    if not script_lines:
+        segf = base / "segments.json"
+        if segf.exists():
+            segs = json.loads(segf.read_text(encoding="utf-8"))
+            script_lines = [
+                {"speaker": s.get("speaker", ""), "text": s.get("text", "")} for s in segs
+            ]
+
+    return title, script_lines
+
+
+def build_approval_payload(render_id: str, blueprint: SceneBlueprint | None = None) -> dict:
+    """What owners review: scene clips, thumbnail, and full script."""
+    base = render.RENDERS_DIR / render_id
+    title = blueprint.title if blueprint else render_id
+    script_title, script_lines = _load_script_lines(base)
+    if script_title and script_title != render_id:
+        title = script_title
 
     s = get_settings()
     base_url = s.approval_base_url.rstrip("/")
@@ -47,6 +71,7 @@ def build_approval_payload(render_id: str, blueprint: SceneBlueprint | None = No
         "title": title,
         "thumbnail_url": thumbnail_url,
         "scene_clips": scene_clips,
+        "script_lines": script_lines,
     }
 
 

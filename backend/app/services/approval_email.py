@@ -18,6 +18,7 @@ def _approval_html(*, record: dict, base_url: str) -> str:
     p = record.get("payload", {})
     title = p.get("title", "Untitled")
     scene_clips = p.get("scene_clips", [])
+    script_lines = p.get("script_lines", [])
     thumbnail_url = p.get("thumbnail_url")
     workflow = record["workflow"]
 
@@ -52,12 +53,31 @@ def _approval_html(*, record: dict, base_url: str) -> str:
       If clips do not play in your mail client, use the browser links above.
     </p>"""
 
+    script_rows = ""
+    for ln in script_lines:
+        who = ln.get("speaker", "")
+        txt = ln.get("text", "")
+        color = "#2563eb" if who.upper() == "HOST" else "#059669"
+        script_rows += (
+            f'<tr><td style="padding:4px 10px;font-weight:700;color:{color};'
+            f'vertical-align:top;white-space:nowrap">{who}</td>'
+            f'<td style="padding:4px 10px;color:#111">{txt}</td></tr>'
+        )
+
+    script_block = ""
+    if script_rows:
+        script_block = f"""
+    <h3 style="color:#111;margin:18px 0 6px">Full script</h3>
+    <table style="border-collapse:collapse;width:100%;font-size:14px;line-height:1.5">{script_rows}</table>"""
+
     return f"""<!doctype html><html><body style="font-family:Arial,sans-serif;background:#f4f5f7;padding:20px">
   <div style="max-width:640px;margin:auto;background:#fff;border-radius:12px;padding:28px;border:1px solid #e5e7eb">
     <h2 style="margin:0 0 6px;color:#111">Approval needed — {workflow.title()}</h2>
     <p style="color:#555;margin:0 0 18px">"{title}"</p>
 
     {media_block}
+
+    {script_block}
 
     <div style="margin:26px 0 6px">
       <a href="{base_url}/api/approvals/act?token=__TOKEN__&action=approve"
