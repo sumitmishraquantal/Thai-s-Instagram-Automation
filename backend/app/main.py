@@ -56,7 +56,7 @@ async def run_pipeline(req: PipelineRequest = PipelineRequest()):
 @app.get("/api/approvals/act", response_class=HTMLResponse)
 async def approvals_act(token: str, action: str):
     """Owners' email links land here. First valid action resolves and (on approve)
-    starts video generation."""
+    uploads the render to Google Drive."""
     result = approvals.resolve_by_token(token, action)
     if result["outcome"] == "invalid":
         return HTMLResponse(
@@ -67,10 +67,9 @@ async def approvals_act(token: str, action: str):
     fired = approvals.fire_resume_if_approved(result)
     if not fired and result.get("status") == approvals.APPROVED:
         rec = result.get("record", {})
-        job_id = approval_gate.resume_after_approval(rec)
-        fired = bool(job_id)
-        if job_id:
-            logger.info("Resumed video job %s after approval %s", job_id, rec.get("id"))
+        fired = approval_gate.resume_after_approval(rec)
+        if fired:
+            logger.info("Resumed GDrive upload after approval %s", rec.get("id"))
 
     if result["outcome"] == "already":
         return HTMLResponse(_approval_page(
@@ -80,11 +79,11 @@ async def approvals_act(token: str, action: str):
         ))
 
     if result["status"] == approvals.APPROVED:
-        sub = "Video generation has started." if fired else "Approved."
+        sub = "Uploading to Google Drive." if fired else "Approved."
         return HTMLResponse(_approval_page("Approved", sub, "#16a34a"))
     return HTMLResponse(_approval_page(
         "Declined",
-        "The request was declined. Nothing will be generated.",
+        "The request was declined. Nothing will be uploaded.",
         "#dc2626",
     ))
 

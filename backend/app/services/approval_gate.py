@@ -1,4 +1,4 @@
-"""Approval gate before Higgsfield video generation."""
+"""Approval gate after Higgsfield video — owners review the reel, then GDrive upload."""
 import json
 import logging
 
@@ -9,39 +9,45 @@ from . import approval_email, approvals, higgsfield_video, render
 logger = logging.getLogger(__name__)
 
 
-def build_approval_payload(render_id: str, blueprint: SceneBlueprint) -> dict:
-    """What owners review: full script + combined audio URL (not the blueprint)."""
+def build_approval_payload(render_id: str, blueprint: SceneBlueprint | None = None) -> dict:
+    """What owners review: Higgsfield scene clips + thumbnail (not the merged reel)."""
     base = render.RENDERS_DIR / render_id
-    script_lines: list[dict] = []
-    title = blueprint.title or render_id
+    title = blueprint.title if blueprint else render_id
 
     script_files = list(base.glob("*.script.json"))
     if script_files:
         try:
             data = json.loads(script_files[0].read_text(encoding="utf-8"))
             title = data.get("title", title)
-            script_lines = [
-                {"speaker": line.get("speaker", ""), "text": line.get("text", "")}
-                for line in data.get("lines", [])
-            ]
         except Exception:  # noqa: BLE001
-            script_lines = []
+            pass
 
-    if not script_lines:
-        segf = base / "segments.json"
-        if segf.exists():
-            segs = json.loads(segf.read_text(encoding="utf-8"))
-            script_lines = [
-                {"speaker": s.get("speaker", ""), "text": s.get("text", "")} for s in segs
-            ]
+    s = get_settings()
+    base_url = s.approval_base_url.rstrip("/")
 
-    audio_url = None
-    mp3s = [p for p in base.glob("*.mp3") if not p.name.lower().startswith("segment")]
-    if mp3s:
-        mp3s.sort(key=lambda p: p.stat().st_size, reverse=True)
-        audio_url = f"{get_settings().approval_base_url}/renders/{render_id}/{mp3s[0].name}"
+    thumbnail_url = None
+    thumb = base / "thumbnail.png"
+    if thumb.exists():
+        thumbnail_url = f"{base_url}/renders/{render_id}/thumbnail.png"
 
-    return {"title": title, "audio_url": audio_url, "script_lines": script_lines}
+    scene_clips: list[dict] = []
+    vid_dir = base / "video"
+    if vid_dir.is_dir():
+        for clip in sorted(vid_dir.glob("scene_*.mp4")):
+            if "_raw" in clip.stem:
+                continue
+            scene_num = clip.stem.replace("scene_", "")
+            scene_clips.append({
+                "name": clip.name,
+                "label": f"Scene {scene_num}",
+                "url": f"{base_url}/renders/{render_id}/video/{clip.name}",
+            })
+
+    return {
+        "title": title,
+        "thumbnail_url": thumbnail_url,
+        "scene_clips": scene_clips,
+    }
 
 
 def save_blueprint(render_id: str, blueprint: SceneBlueprint) -> None:
@@ -62,46 +68,46 @@ def start_video_generation(render_id: str, blueprint: SceneBlueprint) -> str:
     return job_id
 
 
-def gate_video_generation(render_id: str, blueprint: SceneBlueprint) -> dict:
-    """Start video immediately, or create approval + send email first."""
+def gate_publish(render_id: str, job_id: str, blueprint: SceneBlueprint | None = None) -> dict:
+    """After video is ready: email owners for publish approval, or skip if disabled."""
     s = get_settings()
     if not s.require_approval:
-        job_id = start_video_generation(render_id, blueprint)
-        return {"status": "video_started", "job_id": job_id}
+        return {"status": "no_gate", "job_id": job_id}
 
     owners = [o.strip() for o in s.owner_emails.split(",") if o.strip()]
     if not owners:
         raise ValueError("REQUIRE_APPROVAL is on but OWNER_EMAILS is empty in .env")
 
-    save_blueprint(render_id, blueprint)
     record = approvals.create_request(
-        workflow="podcast",
+        workflow="publish",
         render_id=render_id,
         owners=owners,
-        payload=build_approval_payload(render_id, blueprint),
+        payload={**build_approval_payload(render_id, blueprint), "job_id": job_id},
     )
 
-    bp = blueprint
-
     def _resume(rec: dict):
-        loaded = load_blueprint(rec["render_id"]) or bp
-        start_video_generation(rec["render_id"], loaded)
+        rid = rec["render_id"]
+        logger.info("Publish approved — uploading render %s to GDrive", rid)
+        higgsfield_video.schedule_gdrive_upload(rid)
 
     approvals.register_resume(record["id"], _resume)
     email_report = approval_email.send_approval_emails(record)
     return {
         "status": "awaiting_approval",
         "approval_id": record["id"],
+        "job_id": job_id,
         "owners": owners,
         "email": email_report,
-        "message": "Sent for approval. Video generation starts when the first owner approves.",
+        "message": "Video is ready. Sent for approval — GDrive upload starts when the first owner approves.",
     }
 
 
-def resume_after_approval(record: dict) -> str | None:
+def resume_after_approval(record: dict) -> bool:
     """Fallback when in-process callback was lost (e.g. server restart)."""
-    blueprint = load_blueprint(record["render_id"])
-    if blueprint is None:
-        logger.error("Cannot resume render %s — blueprint.json missing", record["render_id"])
-        return None
-    return start_video_generation(record["render_id"], blueprint)
+    render_id = record.get("render_id")
+    if not render_id:
+        logger.error("Cannot resume — approval record has no render_id")
+        return False
+    logger.info("Resuming GDrive upload for render %s after approval %s", render_id, record.get("id"))
+    higgsfield_video.schedule_gdrive_upload(render_id)
+    return True

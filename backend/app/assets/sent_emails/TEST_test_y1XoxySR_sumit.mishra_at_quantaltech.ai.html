@@ -1,0 +1,42 @@
+<!doctype html><html><body style="font-family:Arial,sans-serif;background:#f4f5f7;padding:20px">
+  <div style="max-width:640px;margin:auto;background:#fff;border-radius:12px;padding:28px;border:1px solid #e5e7eb">
+    <h2 style="margin:0 0 6px;color:#111">Approval needed — Publish</h2>
+    <p style="color:#555;margin:0 0 18px">"Test reel"</p>
+
+    
+    <h3 style="color:#111;margin:18px 0 8px">Scene clips for review</h3>
+    <img src="http://localhost:8000/renders/_approval_mail_test/thumbnail.png" alt="Thumbnail" style="width:100%;max-width:360px;border-radius:10px;border:1px solid #e5e7eb;margin:0 0 16px" />
+    
+    <div style="margin:0 0 14px;padding:12px;background:#f9fafb;border-radius:8px;border:1px solid #e5e7eb">
+      <p style="margin:0 0 8px;font-weight:700;color:#111">Scene 01</p>
+      <video controls preload="metadata" width="100%" style="max-width:360px;border-radius:8px;background:#000"
+             src="http://localhost:8000/renders/_approval_mail_test/video/scene_01.mp4"></video>
+      <p style="margin:8px 0 0">
+        <a href="http://localhost:8000/renders/_approval_mail_test/video/scene_01.mp4" style="color:#2563eb;font-weight:600">▶ Open Scene 01 in browser</a>
+      </p>
+    </div>
+    <div style="margin:0 0 14px;padding:12px;background:#f9fafb;border-radius:8px;border:1px solid #e5e7eb">
+      <p style="margin:0 0 8px;font-weight:700;color:#111">Scene 02</p>
+      <video controls preload="metadata" width="100%" style="max-width:360px;border-radius:8px;background:#000"
+             src="http://localhost:8000/renders/_approval_mail_test/video/scene_02.mp4"></video>
+      <p style="margin:8px 0 0">
+        <a href="http://localhost:8000/renders/_approval_mail_test/video/scene_02.mp4" style="color:#2563eb;font-weight:600">▶ Open Scene 02 in browser</a>
+      </p>
+    </div>
+    <p style="color:#888;font-size:12px;margin:0 0 6px">
+      If clips do not play in your mail client, use the browser links above.
+    </p>
+
+    <div style="margin:26px 0 6px">
+      <a href="http://localhost:8000/api/approvals/act?token=IPd7G98565sYnnUb&action=approve"
+         style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;
+                padding:12px 26px;border-radius:8px;font-weight:700;margin-right:10px">✓ Approve</a>
+      <a href="http://localhost:8000/api/approvals/act?token=IPd7G98565sYnnUb&action=decline"
+         style="display:inline-block;background:#dc2626;color:#fff;text-decoration:none;
+                padding:12px 26px;border-radius:8px;font-weight:700">✕ Decline</a>
+    </div>
+    <p style="color:#999;font-size:12px;margin-top:18px">
+      First response decides. If the other owner has already responded, your click
+      will simply show the current status — nothing is regenerated.
+    </p>
+  </div></body></html>

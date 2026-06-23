@@ -1080,51 +1080,67 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
             except Exception:  # noqa: BLE001
                 pass
 
-        # 6 · GDrive upload — scene clips + generated thumbnail (no merged reel or audio)
-        if get_settings().upload_to_gdrive:
-            remote = (get_settings().rclone_remote or "").strip()
-            if not remote:
-                _update(job, step="GDrive upload is ON but RCLONE_REMOTE is empty — skipped.")
-            else:
-                prefix = get_settings().gdrive_clip_prefix or "RawClip"
-                ordered_scenes = sorted(vid_dir.glob("scene_*.mp4"))
-                items: list[tuple[Path, str]] = [
-                    (clip, f"{prefix}{i}{clip.suffix}")
-                    for i, clip in enumerate(ordered_scenes, start=1)
-                ]
-                thumb_path = base_dir / "thumbnail.png"
-                thumb_name = (get_settings().gdrive_thumbnail_name or "Thumbnail.png").strip()
-                if thumb_path.exists() and thumb_name:
-                    items.append((thumb_path, thumb_name))
-                if not items:
-                    _update(job, step="GDrive upload skipped — no scene clips or thumbnail found.")
-                else:
-                    dest = remote
-                    clip_count = len(ordered_scenes)
-                    thumb_note = f" + {thumb_name}" if thumb_path.exists() and thumb_name else ""
-                    _update(job, step=(f"Uploading {clip_count} scene clip(s){thumb_note} to GDrive → {dest} "
-                                       f"({prefix}1..{prefix}{clip_count})"))
-                    ok, log = await _rclone_upload_all(items, dest, rclone_exe=get_settings().rclone_exe)
-                    job["gdrive_upload"] = {"status": "ok" if ok else "failed", "dest": dest,
-                                            "files": [n for _, n in items], "log": log[-600:]}
-                    if ok:
-                        _update(job, step=f"Uploaded {len(items)} file(s) to GDrive ({dest}).")
-                        if get_settings().gdrive_delete_local_after_upload:
-                            removed = 0
-                            for src, _name in items:
-                                try:
-                                    src.unlink()
-                                    removed += 1
-                                except Exception:  # noqa: BLE001
-                                    pass
-                            _update(job, step=f"Removed {removed} local scene clip(s) after confirmed upload.")
-                    else:
-                        _update(job, step=f"GDrive upload FAILED — clips kept locally. rclone says: {log[-300:]}")
-
         _update(job, status="completed", step="Done")
     except Exception as e:  # noqa: BLE001 — job must capture any failure
         logger.exception("Video job %s failed", job_id)
         _update(job, status="failed", step="Failed", error=str(e))
+
+
+async def upload_render_clips_to_gdrive(render_id: str) -> dict:
+    """Upload scene clips + thumbnail for a render to GDrive via rclone."""
+    s = get_settings()
+    if not s.upload_to_gdrive:
+        return {"status": "skipped", "reason": "upload_to_gdrive is off"}
+
+    remote = (s.rclone_remote or "").strip()
+    if not remote:
+        return {"status": "skipped", "reason": "RCLONE_REMOTE is empty"}
+
+    base_dir = RENDERS_DIR / render_id
+    vid_dir = base_dir / "video"
+    prefix = s.gdrive_clip_prefix or "RawClip"
+    ordered_scenes = sorted(
+        p for p in vid_dir.glob("scene_*.mp4") if "_raw" not in p.stem
+    )
+    items: list[tuple[Path, str]] = [
+        (clip, f"{prefix}{i}{clip.suffix}")
+        for i, clip in enumerate(ordered_scenes, start=1)
+    ]
+    thumb_path = base_dir / "thumbnail.png"
+    thumb_name = (s.gdrive_thumbnail_name or "Thumbnail.png").strip()
+    if thumb_path.exists() and thumb_name:
+        items.append((thumb_path, thumb_name))
+
+    if not items:
+        return {"status": "skipped", "reason": "no scene clips or thumbnail found"}
+
+    dest = remote
+    ok, log = await _rclone_upload_all(items, dest, rclone_exe=s.rclone_exe)
+    result = {
+        "status": "ok" if ok else "failed",
+        "dest": dest,
+        "files": [n for _, n in items],
+        "log": log[-600:],
+    }
+    if ok and s.gdrive_delete_local_after_upload:
+        removed = 0
+        for src, _name in items:
+            try:
+                src.unlink()
+                removed += 1
+            except Exception:  # noqa: BLE001
+                pass
+        result["local_files_removed"] = removed
+    return result
+
+
+def schedule_gdrive_upload(render_id: str) -> None:
+    """Fire-and-forget GDrive upload (used from sync approval callbacks)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+    loop.create_task(upload_render_clips_to_gdrive(render_id))
 
 
 async def _rclone_upload_all(items: list[tuple[Path, str]], dest: str, *,

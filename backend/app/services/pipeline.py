@@ -79,39 +79,39 @@ async def run_podcast_pipeline(category: str | None = None) -> PipelineResult:
     print(blueprint.model_dump_json(indent=2))
     print()
 
-    logger.info("Approval gate / video generation for render %s…", render_result.render_id)
-    gate = approval_gate.gate_video_generation(render_result.render_id, blueprint)
+    approval_gate.save_blueprint(render_result.render_id, blueprint)
+    logger.info("Starting video generation for render %s…", render_result.render_id)
+    job_id = approval_gate.start_video_generation(render_result.render_id, blueprint)
+    job = await _wait_for_video_job(job_id)
 
+    merged_path = BACKEND_ROOT / "renders" / render_result.render_id / "video" / "merged_reel.mp4"
+    merged_rel = _relative_path(merged_path) if merged_path.exists() else ""
+
+    gate = approval_gate.gate_publish(render_result.render_id, job_id, blueprint)
     if gate["status"] == "awaiting_approval":
-        logger.info("Awaiting owner approval (id=%s)", gate["approval_id"])
+        logger.info("Awaiting publish approval (id=%s)", gate["approval_id"])
         return PipelineResult(
             render_id=render_result.render_id,
-            job_id="",
+            job_id=job_id,
             title=script_pkg.title,
             category=chosen_category,
             selected_topic=chosen_topic,
-            merged_video_path="",
+            merged_video_path=merged_rel,
             audio_path=_relative_path(BACKEND_ROOT / "renders" / render_result.render_id),
             status="awaiting_approval",
             approval_id=gate["approval_id"],
             message=gate.get("message"),
         )
 
-    job_id = gate["job_id"]
-    job = await _wait_for_video_job(job_id)
-
-    merged_rel = f"renders/{render_result.render_id}/video/merged_reel.mp4"
-    merged_path = BACKEND_ROOT / "renders" / render_result.render_id / "video" / "merged_reel.mp4"
-    if merged_path.exists():
-        merged_rel = _relative_path(merged_path)
-
-    gdrive_upload = job.get("gdrive_upload")
-    if gdrive_upload:
+    gdrive_upload = None
+    if s.upload_to_gdrive:
+        logger.info("Uploading render %s to GDrive…", render_result.render_id)
+        gdrive_upload = await higgsfield_video.upload_render_clips_to_gdrive(render_result.render_id)
         status = gdrive_upload.get("status", "unknown")
         dest = gdrive_upload.get("dest", "")
         if status == "ok":
             logger.info("GDrive upload complete → %s (%d file(s))", dest, len(gdrive_upload.get("files", [])))
-        else:
+        elif status != "skipped":
             logger.warning("GDrive upload failed → %s — %s", dest, gdrive_upload.get("log", "")[-200:])
 
     result = PipelineResult(
