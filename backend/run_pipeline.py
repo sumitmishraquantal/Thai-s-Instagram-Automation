@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run the automated Instagram reel pipeline")
     parser.add_argument(
         "--category",
-        help="Override content category (default: DEFAULT_CATEGORY env or LLM pick)",
+        help="Override content category (default: DEFAULT_CATEGORY env or random pick)",
     )
     args = parser.parse_args()
 

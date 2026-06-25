@@ -46,7 +46,7 @@ async def run_podcast_pipeline(category: str | None = None) -> PipelineResult:
     elif s.default_category.strip():
         chosen_category = s.default_category.strip()
     else:
-        logger.info("Picking category via LLM…")
+        logger.info("Picking random category…")
         chosen_category = await llm.pick_category()
     logger.info("Category: %s", chosen_category)
 

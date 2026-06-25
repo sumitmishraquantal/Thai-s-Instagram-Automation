@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     host_voice_id: str = "CwhRBWXzGAHq8TQ4Fs17"
     guest_voice_id: str = "RDjgzX0qNSGQZkgo5KTT"
 
-    # Blank = LLM picks from CATEGORIES in llm.py
+    # Blank = random pick from CATEGORIES in llm.py
     default_category: str = ""
 
     # Video pipeline provider: "hf_mcp" | "hf_platform" | "fal"

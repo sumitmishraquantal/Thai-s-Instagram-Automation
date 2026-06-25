@@ -32,6 +32,26 @@ CATEGORIES = [
     "Addiction",
     "Trauma Recovery",
     "Recovery Centers",
+    "Depression & Low Mood",
+    "Stress Management",
+    "Burnout & Exhaustion",
+    "Self-Care",
+    "Grief & Loss",
+    "Loneliness & Connection",
+    "Sleep & Rest",
+    "Boundaries & Relationships",
+    "Self-Compassion",
+    "Substance Use Recovery",
+    "Emotional Regulation",
+    "Social Anxiety",
+    "Work-Life Balance",
+    "Resilience & Coping",
+    "Shame & Guilt",
+    "Therapy & Getting Help",
+    "Eating Disorders & Body Image",
+    "Teen Mental Health",
+    "Digital Detox & Screen Time",
+    "Family & Parenting Stress",
 ]
 
 
@@ -246,30 +266,8 @@ MOCK_SCRIPT = {
 
 # ── Public interface ─────────────────────────────────────
 async def pick_category() -> str:
-    """Pick a content category when DEFAULT_CATEGORY is not set."""
-    provider = get_settings().llm_provider.lower()
-    if provider == "mock":
-        return random.choice(CATEGORIES)
-
-    cats = ", ".join(f'"{c}"' for c in CATEGORIES)
-    prompt = (
-        "You are choosing a content category for a mental wellness Instagram Reel.\n"
-        f"Pick exactly ONE category from this list: {cats}.\n"
-        "Choose the category most likely to produce a fresh, emotionally resonant, "
-        "shareable short-form podcast clip for today's audience.\n"
-        "Do not repeat a category that feels generic or overused.\n"
-        'Respond ONLY with valid JSON. No markdown. No text before or after: '
-        '{"category": "exact category name from the list"}'
-    )
-    raw = await _call_llm_json(prompt, max_tokens=200, temperature=0.6)
-    chosen = raw.get("category", "")
-    if chosen in CATEGORIES:
-        return chosen
-    for c in CATEGORIES:
-        if c.lower() == str(chosen).lower():
-            return c
-    logger.warning("LLM returned unknown category %r; falling back to first", chosen)
-    return CATEGORIES[0]
+    """Pick a random content category when DEFAULT_CATEGORY is not set."""
+    return random.choice(CATEGORIES)
 
 
 async def select_best_topic(category: str, topics: list[TrendingTopic]) -> TrendingTopic:
