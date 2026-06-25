@@ -23,24 +23,8 @@ logger = logging.getLogger(__name__)
 RENDERS_DIR = Path(__file__).resolve().parent.parent.parent / "renders"
 RENDERS_DIR.mkdir(exist_ok=True)
 
-TURN_PAUSE_MS = 380  # natural beat between speaker turns
-
-
-def _merge_consecutive(lines: list[ScriptLine]) -> list[ScriptLine]:
-    """Merge consecutive same-speaker lines so each turn is one TTS take."""
-    groups: list[ScriptLine] = []
-    for l in lines:
-        if groups and groups[-1].speaker == l.speaker:
-            prev = groups[-1]
-            groups[-1] = ScriptLine(
-                speaker=prev.speaker,
-                text=f"{prev.text} {l.text}",
-                emotion=prev.emotion,
-                seconds=prev.seconds + l.seconds,
-            )
-        else:
-            groups.append(l)
-    return groups
+TURN_PAUSE_MS = 380   # natural beat between speaker turns
+LINE_PAUSE_MS = 280   # brief pause between consecutive lines from the same speaker
 
 
 def _format_ts(ms: int) -> str:
@@ -83,54 +67,10 @@ def _split_for_subtitles(text: str, start_ms: int, end_ms: int,
     return cues
 
 
-# ── Word-safe segmentation for video generation ──────────
-# Structure (derived from the script, NOT hardcoded): every HOST turn stays a single
-# whole segment (the question is one clip, the closing acknowledgment is one clip);
-# each GUEST turn is split into ~10-12s pieces so the answer reads as a couple of
-# focused clips that still lip-sync tightly. Cuts ONLY ever land in detected silence,
-# so a word is never clipped mid-syllable.
-TARGET_SEGMENT_MS = 8_000    # (kept for the unused _silence_candidates helper)
-MIN_SEGMENT_MS = 5_000
-HARD_MAX_MS = 11_000
-
-# Guest-answer sub-splitting window.
-GUEST_TARGET_MS = 11_000     # aim for ~11s per guest-answer segment
-GUEST_MIN_MS = 10_000        # don't end a guest segment before ~10s if avoidable
-GUEST_MAX_MS = 12_000        # prefer to cut by ~12s
-GUEST_HARD_MAX_MS = 13_500   # if no silence in 10-12s, allow a little past (word-safety wins)
-MIN_TAIL_MS = 3_000          # don't leave a tiny sliver; keep it on the previous piece
-
-
-def _silence_candidates(final: AudioSegment,
-                        turn_spans: list[tuple[int, int, str]]) -> list[int]:
-    """Cut candidates: middle of the pause after each turn, plus real detected
-    silences inside any turn longer than the target. Cuts only ever land in
-    silence, so words are never clipped."""
-    cands: set[int] = set()
-    for i, (start, end, _t, *_rest) in enumerate(turn_spans):
-        if i < len(turn_spans) - 1:
-            cands.add(end + TURN_PAUSE_MS // 2)  # middle of inter-turn pause
-        if end - start > TARGET_SEGMENT_MS:
-            seg = final[start:end]
-            sils = silence.detect_silence(
-                seg, min_silence_len=160, silence_thresh=seg.dBFS - 14
-            )
-            for s, e in sils:
-                if 400 < s and e < len(seg) - 400:  # ignore edges
-                    cands.add(start + (s + e) // 2)
-    return sorted(c for c in cands if 0 < c < len(final))
-
-
-def _quietest_point(final: AudioSegment, around_ms: int, window: int = 1500) -> int:
-    """Last-resort cut: the quietest 80ms in [around-window, around]."""
-    lo = max(0, around_ms - window)
-    best, best_db = around_ms, 999.0
-    step = 40
-    for p in range(lo, around_ms - 80, step):
-        db = final[p:p + 80].dBFS
-        if db < best_db:
-            best, best_db = p + 40, db
-    return best
+# ── Segmentation for video generation ─────────────────────
+# One script line = one TTS clip = one video scene. Cuts never land mid-sentence
+# because we do not merge lines or time-split guest answers anymore.
+MAX_LINE_MS = 13_500   # fallback split only if a single line runs long in practice
 
 
 def _detected_silences_within(final: AudioSegment, start: int, end: int) -> list[int]:
@@ -147,43 +87,32 @@ def _detected_silences_within(final: AudioSegment, start: int, end: int) -> list
 
 def compute_segments(final: AudioSegment,
                      turn_spans: list[tuple[int, int, str, str]]) -> list[tuple[int, int, str]]:
-    """Speaker-bounded segmentation tuned to the Q&A shape.
-
-    - Every HOST turn becomes exactly ONE whole segment (host asks the question =
-      one clip; host acknowledges + ends = one clip).
-    - Each GUEST turn is split into ~10-12s pieces (so a ~22s answer becomes two
-      ~11s clips, a longer answer more — never a fixed count). A short guest turn
-      (<= ~12s) stays whole.
-    - Cuts ONLY land in detected silence, so no word is ever clipped. The number of
-      segments follows the script, not a hardcoded value.
+    """One segment per script line so every scene ends on a complete sentence.
 
     Returns (start_ms, end_ms, speaker).
     """
     segments: list[tuple[int, int, str]] = []
     for (t_start, t_end, _text, speaker) in turn_spans:
         turn_len = t_end - t_start
-        is_guest = str(speaker).upper() == "GUEST"
-
-        # HOST turns are always one whole segment; short GUEST turns too.
-        if not is_guest or turn_len <= GUEST_MAX_MS:
+        if turn_len <= MAX_LINE_MS:
             segments.append((t_start, t_end, speaker))
             continue
 
-        # Long GUEST turn: divide into the FEWEST ~10-12s pieces (even division),
-        # then place each cut at the nearest detected silence to the ideal evenly
-        # spaced boundary. This avoids greedy stranding (a short first piece forcing
-        # an extra tiny segment) and keeps the pieces balanced and word-safe.
+        # Rare fallback: a single line ran longer than expected — split only at
+        # detected pauses inside that line (never merge lines upstream).
         cands = _detected_silences_within(final, t_start, t_end)
-        n = max(1, -(-turn_len // GUEST_MAX_MS))   # ceil(turn_len / 12s) = min #pieces
+        if not cands:
+            segments.append((t_start, t_end, speaker))
+            continue
+        n = max(2, -(-turn_len // MAX_LINE_MS))
         piece = turn_len / n
         boundaries = [t_start]
         prev = t_start
         for k in range(1, n):
             ideal = int(t_start + k * piece)
             ahead = [c for c in cands if prev < c < t_end]
-            cut = (min(ahead, key=lambda c: abs(c - ideal)) if ahead
-                   else _quietest_point(final, ideal))
-            if cut <= prev:                         # safety: never go backwards
+            cut = min(ahead, key=lambda c: abs(c - ideal)) if ahead else ideal
+            if cut <= prev:
                 cut = ideal
             boundaries.append(cut)
             prev = cut
@@ -198,15 +127,16 @@ def compute_segments(final: AudioSegment,
 
 def _segment_text(start: int, end: int,
                   turn_spans: list[tuple[int, int, str, str]]) -> str:
+    for s, e, text, _sp in turn_spans:
+        if s == start and e == end:
+            return text
     parts = [t for (s, e, t, _sp) in turn_spans if s < end and e > start]
     return " ".join(parts)
 
 
 async def render_final_audio(title: str, lines: list[ScriptLine],
                              host_voice_id: str, guest_voice_id: str) -> RenderResponse:
-    turns = _merge_consecutive(lines)
-
-    clips = await elevenlabs_client.synthesize_preview(turns, host_voice_id, guest_voice_id)
+    clips = await elevenlabs_client.synthesize_preview(lines, host_voice_id, guest_voice_id)
 
     render_id = uuid.uuid4().hex[:10]
     out_dir = RENDERS_DIR / render_id
@@ -216,16 +146,19 @@ async def render_final_audio(title: str, lines: list[ScriptLine],
     cues: list[tuple[int, int, str]] = []
 
     turn_spans: list[tuple[int, int, str, str]] = []
-    for turn, clip in zip(turns, clips):
+    for i, (line, clip) in enumerate(zip(lines, clips)):
         seg = AudioSegment.from_file(
             io.BytesIO(base64.b64decode(clip.audio_base64)), format="mp3"
         )
         start_ms = len(final)
         final += seg
         end_ms = len(final)
-        turn_spans.append((start_ms, end_ms, turn.text, turn.speaker))
-        cues.extend(_split_for_subtitles(turn.text, start_ms, end_ms))
-        final += AudioSegment.silent(duration=TURN_PAUSE_MS)
+        turn_spans.append((start_ms, end_ms, line.text, line.speaker))
+        cues.extend(_split_for_subtitles(line.text, start_ms, end_ms))
+        if i < len(lines) - 1:
+            pause = (LINE_PAUSE_MS if lines[i + 1].speaker == line.speaker
+                     else TURN_PAUSE_MS)
+            final += AudioSegment.silent(duration=pause)
 
     final = final.fade_out(200)
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in title)[:40] or "reel"
@@ -242,7 +175,7 @@ async def render_final_audio(title: str, lines: list[ScriptLine],
         encoding="utf-8",
     )
 
-    # Word-safe segments for video generation (one clip per segment)
+    # One segment per script line — scene cuts align with sentence boundaries
     seg_spans = compute_segments(final, turn_spans)
     seg_infos: list[SegmentInfo] = []
     for i, (s, e, speaker) in enumerate(seg_spans, 1):

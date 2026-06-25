@@ -255,11 +255,12 @@ MOCK_TOPICS = [
 MOCK_SCRIPT = {
     "title": "Why Rest Isn't Laziness",
     "lines": [
+        {"speaker": "HOST", "text": "Your guiltiest rest day might be doing the most for your brain.", "emotion": "curious", "seconds": 3},
         {"speaker": "HOST", "text": "What if I told you your rest day is doing more for your mind than your busiest one?", "emotion": "curious", "seconds": 7},
-        {"speaker": "GUEST", "text": "It's true. When we rest, the brain shifts into what scientists call the default mode network. That's when it processes emotions, files away memories, and actually recovers.", "emotion": "calm", "seconds": 13},
-        {"speaker": "GUEST", "text": "Most people think rest is the absence of progress. It's the opposite. Skipping it is like expecting your phone to run all week on one charge.", "emotion": "warm", "seconds": 11},
-        {"speaker": "GUEST", "text": "So if you took a slow day this week and felt guilty about it, don't. That was maintenance, not weakness.", "emotion": "reassuring", "seconds": 9},
-        {"speaker": "HOST", "text": "Maintenance, not weakness. I love that. Save this one for your next guilt-free rest day.", "emotion": "hopeful", "seconds": 7},
+        {"speaker": "GUEST", "text": "It's true. When we rest, the brain shifts into what scientists call the default mode network.", "emotion": "calm", "seconds": 10},
+        {"speaker": "GUEST", "text": "Most people think rest is the absence of progress, but skipping it is like expecting your phone to run all week on one charge.", "emotion": "warm", "seconds": 11},
+        {"speaker": "GUEST", "text": "So if you took a slow day this week and felt guilty about it, don't — that was maintenance, not weakness.", "emotion": "reassuring", "seconds": 9},
+        {"speaker": "HOST", "text": "Maintenance, not weakness. Save this one for your next guilt-free rest day.", "emotion": "hopeful", "seconds": 7},
     ],
 }
 
@@ -382,14 +383,20 @@ TIMING:
 - Each line must have a realistic seconds value that reflects its actual word count.
 
 STRUCTURE (in this exact order):
-1. Thumbnail hook — 1 to 2 seconds. One arresting statement or question. No filler.
-2. Host question — maximum 7 seconds. Specific, curious, conversational. Not a monologue.
-3. Guest answer — 2 to 3 lines totaling 30 to 35 seconds. One continuous flowing reply (see CONVERSATION RULE below).
-4. Host acknowledgement and CTA — maximum 5 seconds. Warm, direct, no corporate language.
+1. Thumbnail hook — 2 to 3 seconds. One arresting complete sentence. No filler.
+2. Host question — maximum 7 seconds. One complete sentence. Specific, curious, conversational.
+3. Guest answer — 2 to 3 lines totaling 30 to 35 seconds. Each line is one complete sentence (see SEGMENT RULE below).
+4. Host acknowledgement and CTA — maximum 5 seconds. One complete sentence. Warm, direct, no corporate language.
 
-CONVERSATION RULE (most important):
-The guest answer must read as ONE unbroken natural reply — each line continues directly from the previous one.
-Use real conversational connectors: "And what that means is...", "But here is the thing...", "So what actually happens is...".
+SEGMENT RULE (critical — each line becomes one video scene):
+Every object in the "lines" array is synthesized and edited as its own audio/video clip.
+- Each line MUST be exactly one complete sentence ending in . ? or ! — never split a sentence across two lines.
+- Never end a line mid-thought or with a dangling phrase that continues on the next line.
+- Guest answer lines: each ~10-12 seconds (~24-29 words), each a full standalone sentence. The answer should still flow conversationally across lines, but every line must sound finished when spoken alone.
+- Keep every line under 12 seconds so no clip cuts mid-sentence.
+
+CONVERSATION RULE:
+The guest answer should read as one continuous reply across 2-3 lines. Use conversational connectors at the START of a new line ("And what that means is...", "But here is the thing...") — never leave a sentence unfinished at the end of a line.
 Never restart context mid-answer. Never list points robotically. Never sound like bullet points read aloud.
 If it sounds like an AI wrote it, rewrite it until it sounds like a real person mid-thought.
 
@@ -409,6 +416,7 @@ AVOID:
 - Any line that sounds scripted, stiff, or AI-generated
 - Emotion tags that do not match the line's actual spoken feeling
 - Word counts that do not match the seconds value given
+- Sentences that spill into the next line or clips that would cut off mid-sentence
 
 Respond ONLY with valid JSON. No markdown. No text before or after the JSON:
 {{"title": "...", "lines": [{{"speaker": "HOST", "text": "...", "emotion": "curious", "seconds": 6}}]}}"""
@@ -477,11 +485,12 @@ async def generate_scene_plan(title: str, lines: list, segments: list | None = N
             f"Segment {s.index}: {s.start_second}s-{s.end_second}s | spoken text: {s.text}"
             for s in segments
         )
-        structure_clause = f"""The audio has already been cut into video-generation segments at natural pauses.
+        structure_clause = f"""The audio has already been cut into video-generation segments — one complete sentence per segment.
 Produce EXACTLY one scene per segment, using these exact start/end times:
 {seg_text}
 
-scene_number must equal the segment index, start_second/end_second must match the segment times."""
+scene_number must equal the segment index, start_second/end_second must match the segment times.
+Each scene covers exactly one full spoken sentence — never plan action for words that belong to the next segment."""
     else:
         structure_clause = "Divide the reel into 3-4 scenes aligned to the dialogue turns."
 
