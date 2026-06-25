@@ -260,7 +260,6 @@ MOCK_SCRIPT = {
         {"speaker": "GUEST", "text": "It's true. When we rest, the brain shifts into what scientists call the default mode network.", "emotion": "calm", "seconds": 10},
         {"speaker": "GUEST", "text": "Most people think rest is the absence of progress, but skipping it is like expecting your phone to run all week on one charge.", "emotion": "warm", "seconds": 11},
         {"speaker": "GUEST", "text": "So if you took a slow day this week and felt guilty about it, don't — that was maintenance, not weakness.", "emotion": "reassuring", "seconds": 9},
-        {"speaker": "HOST", "text": "Maintenance, not weakness. Save this one for your next guilt-free rest day.", "emotion": "hopeful", "seconds": 7},
     ],
 }
 
@@ -382,11 +381,10 @@ TIMING:
 - Estimate at 2.4 words per second. Count your words before finalizing.
 - Each line must have a realistic seconds value that reflects its actual word count.
 
-STRUCTURE (in this exact order):
+STRUCTURE (in this exact order — the reel ENDS on the guest's last line):
 1. Thumbnail hook — 2 to 3 seconds. One arresting complete sentence. No filler.
 2. Host question — maximum 7 seconds. One complete sentence. Specific, curious, conversational.
-3. Guest answer — 2 to 3 lines totaling 30 to 35 seconds. Each line is one complete sentence (see SEGMENT RULE below).
-4. Host acknowledgement and CTA — maximum 5 seconds. One complete sentence. Warm, direct, no corporate language.
+3. Guest answer — 2 to 3 lines totaling 22 to 30 seconds. Each line is one complete sentence (see SEGMENT RULE below). The final line is the closing beat — no host sign-off after it.
 
 SEGMENT RULE (critical — each line becomes one video scene):
 Every object in the "lines" array is synthesized and edited as its own audio/video clip.
@@ -409,6 +407,7 @@ CONTENT RULES:
 - No medical advice. No diagnosis claims. No prescriptive health instructions.
 - No filler phrases: no "absolutely", "great question", "for sure", "definitely", "of course".
 - Guest never repeats the host's question back before answering.
+- Do NOT add a closing host line. No thank-yous, no CTAs, no "thanks for watching", "save this", "follow for more", or similar sign-offs. The guest's last sentence is the ending.
 
 AVOID:
 - Generic opener lines that could fit any topic
