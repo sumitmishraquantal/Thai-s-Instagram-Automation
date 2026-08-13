@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     hf_mcp_url: str = "https://mcp.higgsfield.ai/mcp"
     hf_mcp_callback_port: int = 3030
     hf_max_credits_per_clip: int = 60
+    # MCP video-model family. Default 'seedance' pins to Seedance 2.0 (fast
+    # path, verified). Set to 'kling' (or any other family name in your
+    # Higgsfield catalog) to route generate_video calls to that family
+    # instead — the MCP resolver will search the live catalog for the
+    # newest/omni variant matching the hint. IMPORTANT: after changing this,
+    # restart uvicorn (Ctrl+C, not just --reload) so settings reload, and
+    # run `python diagnose_seedance_deep.py kling` first to confirm the
+    # target family exists on your plan and to see its medias.roles
+    # vocabulary — role names differ between Seedance and Kling.
+    hf_mcp_video_model_hint: str = "seedance"
     scene_limit: int = 0
     chain_scenes: bool = True
     reaction_shots_enabled: bool = True
@@ -41,6 +51,16 @@ class Settings(BaseSettings):
     use_director_skills: bool = True
     seedance_bilingual_prompt: bool = False
     establishing_two_shot: bool = True
+
+    # When True (default), every reel gets a fresh wardrobe for HOST + GUEST
+    # (deterministic per render_id so reruns of the same render match, but
+    # different across renders). The per-render identity images are cached
+    # under renders/<render_id>/images/ — the GLOBAL locked identity in
+    # assets/identity_cache/ is left untouched, so faces + studio stay pinned
+    # while only clothing changes. Costs: two gpt_image_2 generations per
+    # render (host + guest). Set to False to fall back to the original
+    # locked-identity behaviour (same outfit every render).
+    per_render_wardrobe: bool = True
 
     # GDrive upload (via rclone) — Higgsfield scene clips + generated thumbnail
     upload_to_gdrive: bool = True

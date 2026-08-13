@@ -726,11 +726,18 @@
 #         seg_manifest = json.loads((base_dir / "segments.json").read_text(encoding="utf-8"))
 #         seg_by_index = {sgm["index"]: sgm for sgm in seg_manifest}
 
-#         # 1 · studio canon
-#         _update(job, status="running", step="Building studio canon")
-#         canon = await llm.build_visual_canon(blueprint)
-#         studio = canon["studio"]
-#         (base_dir / "visual_canon.json").write_text(json.dumps(canon, indent=2), encoding="utf-8")
+#         # 1 · studio canon — on a per-clip rerun (freeze mode) reuse the SAVED canon so
+#         # nothing about the studio/look is re-derived; only generate it on a fresh run.
+#         saved_canon = base_dir / "visual_canon.json"
+#         if job.get("reuse_existing_identity") and saved_canon.exists():
+#             canon = json.loads(saved_canon.read_text(encoding="utf-8"))
+#             studio = canon["studio"]
+#             _update(job, status="running", step="Studio canon: reusing existing (frozen)")
+#         else:
+#             _update(job, status="running", step="Building studio canon")
+#             canon = await llm.build_visual_canon(blueprint)
+#             studio = canon["studio"]
+#             saved_canon.write_text(json.dumps(canon, indent=2), encoding="utf-8")
 
 #         use_mcp = s.video_provider.lower() == "hf_mcp"
 #         mcp_client = higgsfield_mcp.HiggsfieldMCP(job=job) if use_mcp else None
@@ -764,6 +771,43 @@
 #                                        "talking head."))
 #             for role in roles:
 #                 photo = photos[role]
+#                 # FREEZE (per-scene rerun): reuse the EXISTING identity exactly — never
+#                 # call image generation. Prefer the cached locked ref (0 credits); else
+#                 # register the render's existing images/<role>.png as-is (same pixels).
+#                 if job.get("reuse_existing_identity"):
+#                     sig0 = _identity_signature(photo, studio, "gpt_image_2") if photo else None
+#                     cached0 = _identity_cache_load(role, sig0 if sig0 else "")
+#                     if cached0 and cached0.get("ref"):
+#                         identity_urls[role] = cached0["url"]
+#                         identity_refs[role] = cached0["ref"]
+#                         cpng = IDENTITY_CACHE_DIR / f"{role}.png"
+#                         if cpng.exists():
+#                             shutil.copyfile(cpng, img_dir / f"{role}.png")
+#                         _update(job, step=f"{role.title()} identity frozen — reusing locked ref (0 credits)")
+#                         continue
+#                     existing = img_dir / f"{role}.png"
+#                     if existing.exists():
+#                         ref = None
+#                         try:
+#                             reg = await mcp_client.register_local_image(existing)
+#                             ref = reg.get("ref")
+#                         except Exception as e:  # noqa: BLE001
+#                             logger.warning("freeze-identity register failed for %s: %s", role, e)
+#                         if ref:
+#                             identity_refs[role] = ref
+#                             identity_urls[role] = f"/renders/{render_id}/images/{role}.png"
+#                             if sig0:  # lock so later reruns are fully free
+#                                 _identity_cache_save(role, sig0, identity_urls[role], ref, existing, locked=True)
+#                             _update(job, step=f"{role.title()} identity frozen — reused existing image, no regeneration")
+#                             continue
+#                     if role in ("host", "guest"):
+#                         raise RuntimeError(
+#                             f"Freeze mode: no existing identity for {role} (no locked cache and no "
+#                             f"renders/{render_id}/images/{role}.png). Cannot regenerate a scene without "
+#                             f"touching identity — generate/lock identity once first.")
+#                     _update(job, step=f"Freeze mode: no '{role}' image to reuse — skipping")
+#                     continue
+
 #                 # 1) Locked/cached identity is self-sufficient — reuse it even if
 #                 #    the original reference photo is no longer on disk.
 #                 sig = _identity_signature(photo, studio, "gpt_image_2") if photo else None
@@ -1219,10 +1263,13 @@
 #                 deleted.append(name)
 #     logger.info("Regenerate render=%s scenes=%s (deleted %s) — only these will regenerate",
 #                 render_id, scene_numbers, deleted)
-#     return start_job(render_id, blueprint, False, False)
+#     # reuse_existing_identity=True -> the identity images are FROZEN (reused exactly,
+#     # never regenerated); only the deleted scene clips are re-rendered.
+#     return start_job(render_id, blueprint, False, False, reuse_existing_identity=True)
 
 
-# def start_job(render_id: str, blueprint: SceneBlueprint, force_regen_identity: bool = False, force_regen_scenes: bool = False) -> str:
+# def start_job(render_id: str, blueprint: SceneBlueprint, force_regen_identity: bool = False,
+#               force_regen_scenes: bool = False, reuse_existing_identity: bool = False) -> str:
 #     job_id = uuid.uuid4().hex[:10]
 #     JOBS[job_id] = {
 #         "job_id": job_id, "render_id": render_id,
@@ -1230,9 +1277,12 @@
 #         "scenes": [], "images": {}, "merged_url": None, "error": None, "log": [],
 #         "cost_estimate": 0, "force_regen_identity": force_regen_identity,
 #         "force_regen_scenes": force_regen_scenes,
+#         "reuse_existing_identity": reuse_existing_identity,
 #     }
 #     asyncio.get_event_loop().create_task(run_video_job(job_id, render_id, blueprint))
 #     return job_id
+
+
 
 
 
@@ -1450,32 +1500,105 @@ _STUDIO_SHORT = (
 
 
 # ── Prompt building ───────────────────────────────────────
-def _identity_image_prompt(role: str, studio: str) -> str:
+# A controlled "look a bit younger" cue. It keeps the person's identity and
+# recognizable features but renders them a few years younger. Dial the wording here
+# (e.g. "a few years" -> "5-8 years") to make the effect stronger or weaker.
+_YOUNGER = (
+    "Render this person looking a few years YOUNGER and their face notably CLEANER "
+    "than the reference: smooth, healthy, well-rested skin with softened fine lines "
+    "and reduced under-eye bags, calmed redness, no visible blemishes or breakouts, "
+    "even natural skin tone, a firmer and fresher complexion, brighter clearer eyes "
+    "with catchlights, subtly whiter teeth if visible — while keeping their exact "
+    "identity, bone structure, hair, beard, ears and unmistakably recognizable "
+    "features. Still fully photorealistic and natural: natural pores at a subtle "
+    "level, real skin texture, NEVER airbrushed, plastic, waxy, filtered, "
+    "over-smoothed, cartoony, or de-aged into a different-looking person."
+)
+_YOUNGER_BOTH = (
+    "Render BOTH people looking a few years YOUNGER and their faces notably CLEANER "
+    "than the reference: smooth, healthy, well-rested skin with softened fine lines "
+    "and reduced under-eye bags, calmed redness, no visible blemishes, even natural "
+    "skin tone, fresher complexions, brighter clearer eyes with catchlights — while "
+    "keeping each person's exact identity, bone structure, hair, beard and "
+    "unmistakably recognizable features. Still photorealistic and natural, NEVER "
+    "airbrushed, plastic, waxy, filtered, over-smoothed, or turned into different-"
+    "looking people."
+)
+
+
+def _identity_image_prompt(role: str, studio: str, wardrobe: str | None = None) -> str:
+    """Studio-identity prompt for a single person or the pair.
+
+    `wardrobe` — optional per-render outfit override (see wardrobe.py). When
+    None, we keep the reference photo's clothing. When set (e.g. "an olive-
+    green crewneck sweater over a plain white t-shirt"), we replace the
+    reference clothing with the described outfit while keeping face, hair,
+    beard and build intact.
+    """
+    # Seating layout the identity image must ESTABLISH so scene-to-scene cuts
+    # inherit it: HOST on the RIGHT of the studio, GUEST on the LEFT (viewer
+    # perspective). For the "both" two-shot, host is on frame-right, guest on
+    # frame-left. For a single portrait, the SPEAKER faces off-frame toward
+    # the OTHER person's side.
+    if role == "host":
+        seat_side = "RIGHT"
+        look_side = "LEFT"           # host looks screen-left toward the guest
+        body_angle = "slightly toward the LEFT (toward the off-frame guest)"
+    else:
+        seat_side = "LEFT"
+        look_side = "RIGHT"          # guest looks screen-right toward the host
+        body_angle = "slightly toward the RIGHT (toward the off-frame host)"
+
+    wardrobe_clause = ""
+    if wardrobe and role != "both":
+        wardrobe_clause = (
+            f" WARDROBE for this render (REPLACE the reference photo's clothing): "
+            f"the person is wearing {wardrobe}. Do NOT keep the reference "
+            f"outfit; render the new outfit cleanly, as if they showed up to "
+            f"the podcast wearing this today. Keep face, hair, beard and build "
+            f"exactly the same as the reference."
+        )
+    elif wardrobe and role == "both":
+        wardrobe_clause = (
+            f" WARDROBE for this render (REPLACE the reference photo's clothing on "
+            f"BOTH people): {wardrobe}. Do NOT keep either person's reference outfit."
+        )
+
     if role == "both":
         return (
             f"The TWO exact people from the reference photo together as podcast co-hosts, seated SIDE BY SIDE "
             f"in two separate mid-century grey upholstered armchairs, angled slightly toward each other, both "
-            f"fully visible in one balanced two-shot. {_FIXED_SET} A black dynamic microphone on a black boom "
+            f"fully visible in one balanced two-shot. "
+            f"FIXED SEATING (viewer perspective): the HOST sits on the RIGHT of the frame; the GUEST sits on "
+            f"the LEFT of the frame. They face each other. "
+            f"{_FIXED_SET} A black dynamic microphone on a black boom "
             f"arm reaches in toward each of them from the side, NO headphones (in-person conversation), relaxed "
             f"natural posture, mid-conversation. Faithfully REPLICATE the reference photo: keep BOTH people's "
-            f"faces, hair, beards, build and their black/dark clothing exactly as shown — do not swap or merge "
-            f"their identities. Wide-to-medium vertical 9:16 two-shot, photographic and lifelike (natural skin "
-            f"texture, visible pores, catchlights), warm moody low-key lighting, true-to-life colour, sharp "
+            f"faces, hair, beards, build exactly as shown — do not swap or merge "
+            f"their identities — but {_YOUNGER_BOTH}"
+            f"{wardrobe_clause} "
+            f"Wide-to-medium vertical 9:16 two-shot, photographic and lifelike (healthy clean skin "
+            f"with subtle natural texture, not over-pored, catchlights), warm moody low-key lighting, true-to-life colour, sharp "
             f"focus. No on-screen text, no watermark, no logos, NOT a 3D render, NOT illustration, NOT anime."
         )
     label = "HOST" if role == "host" else "GUEST"
     return (
         f"Faithfully REPLICATE the reference photo of this exact person as a podcast {label}, seated in a "
         f"mid-century grey upholstered armchair with a wooden frame, framed as a SINGLE-PERSON SHOT — ONLY "
-        f"this one person is visible in frame, no second person, no one sitting opposite. {_FIXED_SET} A black "
+        f"this one person is visible in frame, no second person, no one sitting opposite. "
+        f"FIXED SEATING (viewer perspective, IMPORTANT): the {label} is seated on the {seat_side} side of "
+        f"the podcast studio. Compose this portrait with the person on the {seat_side} of the vertical frame, "
+        f"with lookroom on the {look_side} side. Body angled {body_angle}. The person is looking off-frame "
+        f"toward the {look_side} (screen-{look_side.lower()}), NOT into the lens. "
+        f"{_FIXED_SET} A black "
         f"dynamic microphone on a black boom arm reaches in from the side, NO headphones (this is an in-person "
-        f"conversation), body relaxed and angled slightly toward the other person (off-camera to the side), "
-        f"hands resting naturally. Keep the person's face, hair, beard, build and their black/dark clothing "
-        f"exactly as in the reference photo — same wardrobe, same studio, same warm lighting. Looking off to "
-        f"the side toward the other person (not into the lens). Vertical 9:16 composition. "
+        f"conversation), hands resting naturally. Keep the person's identity, bone structure, hair, beard, build and "
+        f"recognizable features from the reference photo (unmistakably the same person) — but {_YOUNGER}"
+        f"{wardrobe_clause} "
+        f"Vertical 9:16 composition. "
         f"PHOTOREALISTIC like a real photograph of a real human shot on a cinema camera with a 50mm lens and "
-        f"shallow depth of field; lifelike skin with natural texture, visible pores and subtle subsurface "
-        f"tones (never airbrushed, plastic or waxy); catchlights in the eyes; warm moody studio lighting; "
+        f"shallow depth of field; healthy clean lifelike skin with subtle natural texture (not heavily wrinkled or "
+        f"over-pored, never airbrushed, plastic or waxy); catchlights in the eyes; warm moody studio lighting; "
         f"true-to-life colour. Sharp focus, no text, no watermark, "
         f"no logos, NOT a 3D render, NOT illustration, NOT anime/cartoon."
     )
@@ -1508,6 +1631,20 @@ def _scene_video_prompt(scene: Scene, studio: str, speaker_role: str,
     humor = (scene.humor or "").strip()
     cue = (scene.reaction_cue or "listening intently and nodding slowly, attentive and engaged").strip()
 
+    # Fixed seating layout from the viewer's perspective: HOST sits on the
+    # RIGHT of the studio, GUEST sits on the LEFT. Every single-person shot
+    # therefore has a fixed screen position and eye-line direction — the
+    # host looks screen-LEFT (toward the off-frame guest), the guest looks
+    # screen-RIGHT (toward the off-frame host). This is the standard 180°
+    # rule for over-the-shoulder / eyeline continuity in edited dialogue.
+    speaker_side = "RIGHT" if speaker == "host" else "LEFT"
+    listener_side = "LEFT" if speaker == "host" else "RIGHT"
+    look_dir = ("toward the LEFT of the frame (screen-left, viewer's left)"
+                if speaker == "host"
+                else "toward the RIGHT of the frame (screen-right, viewer's right)")
+    body_angle = ("slightly toward the left"
+                  if speaker == "host" else "slightly toward the right")
+
     parts = [
         # Subjects + the iron framing rule
         f"A photorealistic in-person podcast clip, all filmed in ONE studio. TWO reference images are "
@@ -1516,6 +1653,14 @@ def _scene_video_prompt(scene: Scene, studio: str, speaker_role: str,
         f"CRITICAL FRAMING RULE: only ONE person is ever visible in the frame at any single moment — this "
         f"is a tight single-person vertical shot. NEVER show both people in the same frame; no two-shot, "
         f"no split-screen, no second person seated or blurred in the background.",
+
+        # Fixed seating and framing so scene-to-scene cuts stay spatially consistent
+        f"SEATING LAYOUT (viewer perspective, fixed for the whole reel): the HOST sits on the RIGHT of "
+        f"the studio; the GUEST sits on the LEFT. In THIS shot the {speaker} is on camera and the "
+        f"{listener} is OFF-CAMERA to the {listener_side} of the frame. Compose the {speaker} slightly to "
+        f"the {speaker_side} side of the vertical frame with the empty lookroom on the {listener_side} "
+        f"side, body angled {body_angle} (toward the off-frame {listener}), and eye-line directed "
+        f"{look_dir} — NEVER into the lens.",
 
         # The speaking action, hard lip-sync to the audio
         f"Primary action: the {speaker} is mid-conversation, speaking into the studio microphone. The mouth "
@@ -1532,18 +1677,27 @@ def _scene_video_prompt(scene: Scene, studio: str, speaker_role: str,
     if humor:
         parts.append(f"Subtle, natural touch (only if it fits the moment): {humor}.")
     parts.append(
-        f"Eye contact: {eyes}. This is a real in-person conversation — the {speaker} looks mostly toward the "
-        f"OTHER person off to the side, NOT into the camera (no fixed camera stare)."
+        f"Eye contact: {eyes}. This is a real in-person conversation — the {speaker} looks {look_dir} "
+        f"toward the OTHER person seated off-frame to the {listener_side}, NOT into the camera (no fixed "
+        f"camera stare)."
     )
 
     if want_reaction:
+        # Listener is on the opposite side of the frame — keep the same layout
+        # when we cut to them, so it feels like the same room / same seats.
+        listener_own_side = "LEFT" if listener == "guest" else "RIGHT"
+        listener_look_dir = ("toward the RIGHT of the frame (screen-right)"
+                             if listener == "guest"
+                             else "toward the LEFT of the frame (screen-left)")
         parts.append(
             f"REACTION BEAT (still single-person — no two-shot): for a brief moment, about 1 to 2 seconds in "
-            f"the middle of the clip, cut to the {listener} ALONE in frame (use the SECOND reference image) — "
-            f"{cue}; mouth closed, NOT speaking, just a natural listening reaction such as a slow nod or a small "
-            f"empathetic look — then cut back to the {speaker} speaking. The audio keeps playing throughout (it is "
-            f"the {speaker}'s voice); the {listener} never talks. Even during this brief cut, only ONE person is on "
-            f"screen, and it is the same studio and lighting."
+            f"the middle of the clip, cut to the {listener} ALONE in frame (use the SECOND reference image). "
+            f"The {listener} is composed on the {listener_own_side} side of the frame (they are seated on "
+            f"the {listener_own_side} of the studio) and looks {listener_look_dir} toward the off-frame "
+            f"{speaker} — {cue}; mouth closed, NOT speaking, just a natural listening reaction such as a "
+            f"slow nod or a small empathetic look — then cut back to the {speaker} speaking. The audio "
+            f"keeps playing throughout (it is the {speaker}'s voice); the {listener} never talks. Even "
+            f"during this brief cut, only ONE person is on screen, and it is the same studio and lighting."
         )
 
     # Identity + set lock
@@ -1562,9 +1716,12 @@ def _scene_video_prompt(scene: Scene, studio: str, speaker_role: str,
     )
     # Negative guidance
     parts.append(
-        f"Negative: do NOT change the people, do NOT change the location; no two people in one frame, no second "
-        f"person in the background, no headphones, no on-screen text, no captions, no logos, no cartoon/anime/3D-"
-        f"render look, no plastic or waxy skin, no fixed camera stare."
+        f"Negative: do NOT change the people, do NOT change the location; do NOT flip the seating (the "
+        f"HOST is always on the RIGHT of the studio, the GUEST always on the LEFT); do NOT compose the "
+        f"{speaker} on the {listener_side} side of the frame; do NOT make the {speaker} look into the "
+        f"lens; no two people in one frame, no second person in the background, no headphones, no "
+        f"on-screen text, no captions, no logos, no cartoon/anime/3D-render look, no plastic or waxy skin, "
+        f"no fixed camera stare."
     )
     return " ".join(parts)
 
@@ -1582,8 +1739,9 @@ def _image_concept_brief(role: str, studio: str) -> str:
             f"An editorial two-shot photograph of TWO real podcast co-hosts seated SIDE BY SIDE in two "
             f"separate mid-century grey upholstered armchairs, angled slightly toward each other, a black boom "
             f"microphone reaching in toward each from the side, relaxed and mid-conversation. Both people fully "
-            f"visible in one balanced frame. Vertical 9:16. Faithfully reproduce the reference photo (same "
-            f"people, same wardrobe, same studio). Aim for a believable real-photograph look (film/editorial, "
+            f"visible in one balanced frame. Vertical 9:16. Reproduce the same two people from the reference "
+            f"photo (same wardrobe, same studio) but a few years YOUNGER — smoother, well-rested skin and fewer "
+            f"under-eye bags, still natural and unmistakably them. Aim for a believable real-photograph look (film/editorial, "
             f"not glossy CGI). Studio: {_FIXED_SET}"
         )
     who = "podcast host" if role == "host" else "podcast guest"
@@ -1591,8 +1749,10 @@ def _image_concept_brief(role: str, studio: str) -> str:
         f"Single editorial portrait of one real {who} seated in a mid-century grey upholstered armchair in a "
         f"warm in-person podcast studio, a black boom microphone reaching in from the side, body relaxed and "
         f"angled slightly toward the other person off to the side (off-camera), looking off to the side (not at "
-        f"the lens). One person only in frame. Vertical 9:16. Faithfully reproduce the reference photo (same "
-        f"person, same black/dark wardrobe, same studio). Aim for a believable real-photograph look "
+        f"the lens). One person only in frame. Vertical 9:16. Reproduce the same person from the reference "
+        f"photo (same wardrobe, same studio) but a few years YOUNGER — smoother, well-rested skin, softened "
+        f"fine lines and fewer under-eye bags, still natural and unmistakably them. Aim for a believable "
+        f"real-photograph look "
         f"(film/editorial, not glossy CGI). Studio: {_FIXED_SET}"
     )
 
@@ -1601,20 +1761,25 @@ def _image_enforcement(role: str) -> str:
     if role == "both":
         return (
             "NON-NEGOTIABLE CONSTRAINTS (override anything above that conflicts): " + _FIXED_SET +
-            " Keep BOTH people's faces, hair, beards, build and their black/dark clothing EXACTLY as in the "
-            "supplied reference photo — do not swap, merge or invent identities. A balanced TWO-SHOT: both "
+            " Keep BOTH people's identities, bone structure, hair, beards, build and recognizable features from "
+            "the supplied reference photo (unmistakably the same two people), same wardrobe — do not swap, "
+            "merge or invent identities — but " + _YOUNGER_BOTH +
+            " A balanced TWO-SHOT: both "
             "people fully visible, seated SIDE BY SIDE in separate grey armchairs angled slightly toward each "
             "other. NO headphones (in-person conversation). Vertical 9:16. No on-screen text, no captions, no "
-            "watermark, no logos. Render as a real photograph (natural skin texture, visible pores, "
-            "catchlights), NOT a 3D render, NOT illustration, NOT anime."
+            "watermark, no logos. Render as a real photograph (healthy skin with subtle natural texture — not "
+            "heavily wrinkled or over-pored, and not airbrushed — with catchlights), NOT a 3D render, NOT "
+            "illustration, NOT anime."
         )
     return (
         "NON-NEGOTIABLE CONSTRAINTS (override anything above that conflicts): " + _FIXED_SET +
-        " Keep the person's face, hair, beard, build and their black/dark clothing EXACTLY as in the supplied "
-        "reference image — zero identity changes, same wardrobe. SINGLE-PERSON SHOT: only this one person is "
+        " Keep the person's identity, bone structure, hair, beard, build and recognizable features from the "
+        "supplied reference image (unmistakably the same person), same wardrobe — but " + _YOUNGER +
+        " SINGLE-PERSON SHOT: only this one person is "
         "visible, no second person, no one sitting opposite. They sit in a mid-century grey upholstered "
         "armchair. NO headphones (in-person conversation). Vertical 9:16. No on-screen text, no captions, no "
-        "watermark, no logos. Render as a real photograph (natural skin texture, visible pores, catchlights), "
+        "watermark, no logos. Render as a real photograph (healthy skin with subtle natural texture — not "
+        "heavily wrinkled or over-pored, and not airbrushed — with catchlights), "
         "NOT a 3D render, NOT illustration, NOT anime."
     )
 
@@ -1743,11 +1908,25 @@ def _fallback_thumbnail_copy(base_dir: Path) -> Path | None:
 
 def _video_concept_brief(scene: Scene, speaker: str, listener: str,
                          want_reaction: bool, duration: int, cam: str) -> str:
+    # Fixed seating: HOST on the RIGHT of the studio, GUEST on the LEFT
+    # (viewer perspective). Derive per-shot layout from that.
+    spk_lc = speaker.lower()
+    lis_lc = listener.lower()
+    speaker_side = "RIGHT" if spk_lc == "host" else "LEFT"
+    listener_side = "LEFT" if spk_lc == "host" else "RIGHT"
+    look_dir = ("screen-LEFT (viewer's left)" if spk_lc == "host"
+                else "screen-RIGHT (viewer's right)")
+
     bits = [
         f"A calm, friendly IN-PERSON podcast conversation clip, about {duration}s, vertical 9:16, single "
         f"camera, minimal cuts. The {speaker} is the on-camera speaker; the {listener} is the other "
         f"participant (off-camera, seated to the side). This is a relaxed studio chat — not action, not a "
         f"confrontation.",
+        f"Seating layout (viewer perspective, fixed for the whole reel): the HOST sits on the RIGHT of "
+        f"the studio, the GUEST sits on the LEFT. In this shot the {speaker} is on the {speaker_side} of "
+        f"the frame; the {listener} is off-camera to the {listener_side}. Compose the {speaker} slightly "
+        f"to the {speaker_side} with lookroom on the {listener_side}, body angled toward the off-frame "
+        f"{listener}.",
         f"The {speaker}'s spoken audio is SUPPLIED separately — do NOT write any dialogue, narration or "
         f"subtitles; only describe the visible performance that lip-syncs to that audio.",
         f"What the {speaker} does on this line: {scene.character_action}.",
@@ -1760,13 +1939,20 @@ def _video_concept_brief(scene: Scene, speaker: str, listener: str,
     if (scene.humor or "").strip():
         bits.append(f"Light optional touch (only if it fits): {scene.humor}.")
     eyes = (scene.eye_contact or "looks mostly toward the other person to the side, brief glances down").strip()
-    bits.append(f"Eye-line: {eyes} (not staring at the camera).")
+    bits.append(f"Eye-line: {eyes} — directed off-frame {look_dir} toward the {listener} "
+                f"(not staring at the camera).")
     bits.append(f"Camera: {cam}.")
     if want_reaction:
+        # When we cut to the listener, they're on their own side of the studio
+        # (mirror of the speaker layout), looking back toward the speaker.
+        lis_own_side = "LEFT" if lis_lc == "guest" else "RIGHT"
+        lis_look_dir = ("screen-RIGHT" if lis_lc == "guest" else "screen-LEFT")
         cue = (scene.reaction_cue or "nods slowly, listening, attentive").strip()
         bits.append(
             f"Include ONE brief (~1-2s) cut to the {listener} ALONE reacting ({cue}, not speaking), then "
-            f"back to the {speaker}. Never both people in one frame."
+            f"back to the {speaker}. On the cut, the {listener} is composed on the {lis_own_side} side of "
+            f"the frame and looks off-frame {lis_look_dir} toward the off-camera {speaker}. Never both "
+            f"people in one frame."
         )
     else:
         bits.append("Single continuous take, no cuts.")
@@ -1775,20 +1961,36 @@ def _video_concept_brief(scene: Scene, speaker: str, listener: str,
 
 
 def _video_enforcement(scene: Scene, speaker: str, listener: str, want_reaction: bool) -> str:
+    spk_lc = speaker.lower()
+    speaker_side = "RIGHT" if spk_lc == "host" else "LEFT"
+    listener_side = "LEFT" if spk_lc == "host" else "RIGHT"
+    look_dir = ("screen-LEFT (viewer's left)" if spk_lc == "host"
+                else "screen-RIGHT (viewer's right)")
     parts = [
         "NON-NEGOTIABLE TECHNICAL CONTRACT (override anything above that conflicts):",
         f"Only ONE person is ever visible at any instant — tight single-person vertical shot. NEVER show "
         f"both people in the same frame; no two-shot, no split-screen, no second person in the background.",
+        f"FIXED SEATING (viewer perspective): the HOST is on the RIGHT of the studio, the GUEST is on "
+        f"the LEFT. This layout NEVER flips between scenes. In this shot the {speaker} is composed on "
+        f"the {speaker_side} of the frame with lookroom on the {listener_side} side, body angled toward "
+        f"the {listener} who is off-frame to the {listener_side}, and the {speaker}'s eye-line points "
+        f"off-frame {look_dir}. Do NOT place the {speaker} on the {listener_side}, do NOT mirror or flip "
+        f"the frame, do NOT have the {speaker} look into the lens.",
         f"The {speaker} is the primary subject (FIRST reference image). The mouth movements must EXACTLY "
         f"lip-sync to the PROVIDED audio track — say only what the audio says, never invent or mouth words "
         f"not in the audio. Do NOT add any spoken dialogue, narration, subtitles or an Audio section; the "
         f"audio is supplied separately.",
     ]
     if want_reaction:
+        lis_lc = listener.lower()
+        lis_own_side = "LEFT" if lis_lc == "guest" else "RIGHT"
+        lis_look_dir = ("screen-RIGHT" if lis_lc == "guest" else "screen-LEFT")
         parts.append(
             f"The ONE permitted cut is a brief ~1-2s glimpse of the {listener} ALONE (SECOND reference "
             f"image) listening/reacting with mouth closed, then back to the {speaker}; otherwise a single "
-            f"continuous take. Even during this cut, only one person is on screen."
+            f"continuous take. Even during this cut, only one person is on screen — and the {listener} "
+            f"is composed on the {lis_own_side} side of the frame, looking off-frame {lis_look_dir} "
+            f"toward the off-camera {speaker} (same fixed seating layout, no flip)."
         )
     else:
         parts.append("Single continuous take, no hard cuts.")
@@ -1964,18 +2166,61 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
         seg_manifest = json.loads((base_dir / "segments.json").read_text(encoding="utf-8"))
         seg_by_index = {sgm["index"]: sgm for sgm in seg_manifest}
 
-        # 1 · studio canon — on a per-clip rerun (freeze mode) reuse the SAVED canon so
-        # nothing about the studio/look is re-derived; only generate it on a fresh run.
-        saved_canon = base_dir / "visual_canon.json"
-        if job.get("reuse_existing_identity") and saved_canon.exists():
-            canon = json.loads(saved_canon.read_text(encoding="utf-8"))
-            studio = canon["studio"]
-            _update(job, status="running", step="Studio canon: reusing existing (frozen)")
-        else:
-            _update(job, status="running", step="Building studio canon")
-            canon = await llm.build_visual_canon(blueprint)
-            studio = canon["studio"]
-            saved_canon.write_text(json.dumps(canon, indent=2), encoding="utf-8")
+        # ── Full script dump ────────────────────────────────────────────
+        # Print the entire reel script to the terminal so operators can see
+        # exactly what will be generated BEFORE any Higgsfield credits are
+        # spent. Reads the <title>.script.json produced by the render step
+        # (title + ordered speaker lines + per-line timing). Falls back to
+        # just the segments manifest if the script file isn't present.
+        try:
+            script_lines: list[dict] = []
+            script_title = ""
+            script_path = next(iter(sorted(base_dir.glob("*.script.json"))), None)
+            if script_path:
+                script_data = json.loads(script_path.read_text(encoding="utf-8"))
+                script_title = str(script_data.get("title", "")).strip()
+                script_lines = list(script_data.get("lines", []))
+            total_secs = sum(float(sg.get("duration", 0)) for sg in seg_manifest)
+            banner = "─" * 78
+            header = f" REEL SCRIPT — render_id={render_id}"
+            if script_title:
+                header += f" — “{script_title}”"
+            header += f" — {len(script_lines) or len(seg_manifest)} line(s), ~{total_secs:.1f}s"
+            print()
+            print(banner)
+            print(header)
+            print(banner)
+            if script_lines:
+                for i, ln in enumerate(script_lines, start=1):
+                    spk = str(ln.get("speaker", "?")).upper()
+                    text = str(ln.get("text", "")).strip()
+                    seg = seg_by_index.get(i) or {}
+                    dur = float(seg.get("duration", 0))
+                    start = float(seg.get("start", 0))
+                    end = start + dur if dur else 0.0
+                    ts = f"[{start:6.2f}s → {end:6.2f}s | {dur:4.1f}s]" if dur else " " * 30
+                    print(f"  {i:>2}. {ts}  {spk:<5} │ {text}")
+            else:
+                # No script file — fall back to whatever the manifest carries
+                for sg in seg_manifest:
+                    i = sg.get("index", "?")
+                    spk = str(sg.get("speaker", "?")).upper()
+                    text = str(sg.get("text", "")).strip() or "(no text on manifest)"
+                    dur = float(sg.get("duration", 0))
+                    start = float(sg.get("start", 0))
+                    print(f"  {i:>2}. [{start:6.2f}s | {dur:4.1f}s]  {spk:<5} │ {text}")
+            print(banner)
+            print()
+            logger.info("Full reel script printed for render_id=%s (%d line(s))",
+                        render_id, len(script_lines) or len(seg_manifest))
+        except Exception as _e:  # noqa: BLE001 — script printing must never fail the job
+            logger.warning("Could not print full script for render_id=%s: %s", render_id, _e)
+
+        # 1 · studio canon
+        _update(job, status="running", step="Building studio canon")
+        canon = await llm.build_visual_canon(blueprint)
+        studio = canon["studio"]
+        (base_dir / "visual_canon.json").write_text(json.dumps(canon, indent=2), encoding="utf-8")
 
         use_mcp = s.video_provider.lower() == "hf_mcp"
         mcp_client = higgsfield_mcp.HiggsfieldMCP(job=job) if use_mcp else None
@@ -1993,6 +2238,25 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
         identity_urls: dict[str, str] = {}
         identity_refs: dict[str, str] = {}
 
+        # ── Per-render wardrobe ─────────────────────────────────────────
+        # Every reel picks a fresh outfit for host + guest (deterministic per
+        # render_id so a rerun of the same render matches, different across
+        # renders). Persist alongside blueprint/canon so the reel is fully
+        # reproducible from disk. When True, we generate a per-render
+        # identity image with the new outfit and store it under
+        # renders/<render_id>/images/<role>.png — the GLOBAL locked identity
+        # in assets/identity_cache/ is left untouched, so faces and studio
+        # stay pinned while only clothing changes.
+        _s = get_settings()
+        want_wardrobe = getattr(_s, "per_render_wardrobe", True)
+        wardrobe = None
+        if want_wardrobe and use_mcp:
+            from . import wardrobe as _wardrobe_mod
+            wardrobe = _wardrobe_mod.wardrobe_for_render(render_id)
+            _wardrobe_mod.save_wardrobe(base_dir, wardrobe)
+            _update(job, step=f"Wardrobe for this render — HOST: {wardrobe['host'][:60]}…")
+            _update(job, step=f"Wardrobe for this render — GUEST: {wardrobe['guest'][:60]}…")
+
         if use_mcp:
             import shutil
             both_photo = _character_path("both")
@@ -2000,7 +2264,7 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
             # host + guest always; 'both' only when the establishing two-shot is on
             # AND we have either a locked 'both' identity or a both-photo to make one.
             roles = ["host", "guest"]
-            if get_settings().establishing_two_shot:
+            if _s.establishing_two_shot:
                 if both_photo or _identity_cache_load("both", "") or (IDENTITY_CACHE_DIR / "both.png").exists():
                     roles.append("both")
                 else:
@@ -2009,43 +2273,93 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                                        "talking head."))
             for role in roles:
                 photo = photos[role]
-                # FREEZE (per-scene rerun): reuse the EXISTING identity exactly — never
-                # call image generation. Prefer the cached locked ref (0 credits); else
-                # register the render's existing images/<role>.png as-is (same pixels).
-                if job.get("reuse_existing_identity"):
-                    sig0 = _identity_signature(photo, studio, "gpt_image_2") if photo else None
-                    cached0 = _identity_cache_load(role, sig0 if sig0 else "")
-                    if cached0 and cached0.get("ref"):
-                        identity_urls[role] = cached0["url"]
-                        identity_refs[role] = cached0["ref"]
-                        cpng = IDENTITY_CACHE_DIR / f"{role}.png"
-                        if cpng.exists():
-                            shutil.copyfile(cpng, img_dir / f"{role}.png")
-                        _update(job, step=f"{role.title()} identity frozen — reusing locked ref (0 credits)")
-                        continue
-                    existing = img_dir / f"{role}.png"
-                    if existing.exists():
-                        ref = None
+
+                # ── Per-render wardrobe path ─────────────────────────
+                # If wardrobe is set, we generate an identity image for THIS
+                # render only. We look at renders/<render_id>/images/<role>.png
+                # (cached across reruns of this same render) rather than the
+                # global identity_cache. The global cache is NOT written to.
+                if wardrobe:
+                    per_render_png = img_dir / f"{role}.png"
+                    per_render_meta = img_dir / f"{role}.json"
+                    if (per_render_png.exists() and per_render_meta.exists()
+                            and not job.get("force_regen_identity")):
                         try:
-                            reg = await mcp_client.register_local_image(existing)
-                            ref = reg.get("ref")
-                        except Exception as e:  # noqa: BLE001
-                            logger.warning("freeze-identity register failed for %s: %s", role, e)
-                        if ref:
-                            identity_refs[role] = ref
-                            identity_urls[role] = f"/renders/{render_id}/images/{role}.png"
-                            if sig0:  # lock so later reruns are fully free
-                                _identity_cache_save(role, sig0, identity_urls[role], ref, existing, locked=True)
-                            _update(job, step=f"{role.title()} identity frozen — reused existing image, no regeneration")
-                            continue
-                    if role in ("host", "guest"):
-                        raise RuntimeError(
-                            f"Freeze mode: no existing identity for {role} (no locked cache and no "
-                            f"renders/{render_id}/images/{role}.png). Cannot regenerate a scene without "
-                            f"touching identity — generate/lock identity once first.")
-                    _update(job, step=f"Freeze mode: no '{role}' image to reuse — skipping")
+                            meta = json.loads(per_render_meta.read_text(encoding="utf-8"))
+                            if meta.get("ref"):
+                                _update(job, step=f"Reusing this render's cached {role} identity (0 credits)")
+                                identity_urls[role] = meta.get("url") or f"/renders/{render_id}/images/{role}.png"
+                                identity_refs[role] = meta["ref"]
+                                continue
+                        except Exception:  # noqa: BLE001
+                            pass
+                    # Need a source photo to compose the wardrobe onto.
+                    if role == "both":
+                        if not (host_photo and guest_photo) and not photo:
+                            raise RuntimeError(
+                                "Wardrobe mode: 'both' needs either an explicit both photo "
+                                "OR both host+guest photos to compose from.")
+                        img_files = [photo] if photo else [host_photo, guest_photo]
+                    else:
+                        if not photo:
+                            raise RuntimeError(
+                                f"Wardrobe mode needs the raw reference photo at "
+                                f"assets/characters/{role}.* to render the new outfit onto.")
+                        img_files = [photo]
+                    _update(job, step=f"Generating {role} identity image WITH new wardrobe for this render")
+                    outfit = wardrobe.get(role, "")
+                    img_prompt = None
+                    if _s.use_director_skills:
+                        img_prompt = await director_skills.image_prompt(
+                            _image_concept_brief(role, studio),
+                            _image_enforcement(role))
+                        # Skill doesn't know about wardrobe — append a strong
+                        # per-render wardrobe directive so it can't be ignored.
+                        if img_prompt and outfit:
+                            img_prompt = (
+                                img_prompt +
+                                f"\n\nPER-RENDER WARDROBE OVERRIDE (mandatory): REPLACE the "
+                                f"reference photo's clothing entirely. The {role} is wearing: "
+                                f"{outfit}. Keep face, hair, beard and build exactly. Do NOT "
+                                f"keep the reference outfit."
+                            )
+                    if not img_prompt:
+                        img_prompt = (
+                            _identity_image_prompt(role, studio, wardrobe=outfit) +
+                            " Keep the person's face, hair and likeness exactly as in the "
+                            "reference image; only the clothing changes to the described outfit."
+                        )
+                    gen = await mcp_client.generate(
+                        "image",
+                        prompt=img_prompt,
+                        model_hint="gpt_image_2",
+                        image_files=img_files,
+                        aspect_ratio=s.hf_aspect_ratio,
+                        resolution="2k",
+                    )
+                    identity_urls[role] = gen["url"]
+                    dest = img_dir / f"{role}.png"
+                    await _download(gen["url"], dest)
+                    # Register once so the same media id is reused across
+                    # every scene in this render (0 credits per scene).
+                    per_render_ref = gen.get("ref")
+                    try:
+                        _update(job, step=f"Registering {role} per-render identity for reuse across scenes")
+                        reg = await mcp_client.register_local_image(dest)
+                        if reg.get("ref"):
+                            per_render_ref = reg["ref"]
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("per-render identity register failed for %s: %s", role, e)
+                    identity_refs[role] = per_render_ref
+                    per_render_meta.write_text(
+                        json.dumps({"url": gen["url"], "ref": per_render_ref,
+                                    "outfit": outfit}, indent=2),
+                        encoding="utf-8",
+                    )
+                    _update(job, step=f"{role.title()} identity ready with new outfit — will be used for every scene")
                     continue
 
+                # ── Original (no-wardrobe) path — unchanged behaviour ─
                 # 1) Locked/cached identity is self-sufficient — reuse it even if
                 #    the original reference photo is no longer on disk.
                 sig = _identity_signature(photo, studio, "gpt_image_2") if photo else None
@@ -2075,7 +2389,7 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
                 # headphones. Falls back to the built-in prompt if the skill is off
                 # or its LLM call returns nothing.
                 img_prompt = None
-                if get_settings().use_director_skills:
+                if _s.use_director_skills:
                     img_prompt = await director_skills.image_prompt(
                         _image_concept_brief(role, studio), _image_enforcement(role))
                     if img_prompt:
@@ -2335,39 +2649,32 @@ async def run_video_job(job_id: str, render_id: str, blueprint: SceneBlueprint):
             _merge_with_reel_audio(scene_files, _find_reel_audio(base_dir), merged)
         job["merged_url"] = f"/renders/{render_id}/video/{merged.name}"
 
-        # 5 · thumbnail — styled Reel cover via Higgsfield (fallback: copy identity image).
-        # Reuse an existing thumbnail when one is already present and this isn't a full
-        # force-regen, so a per-scene clip rerun does NOT re-spend on the thumbnail.
-        existing_thumb = base_dir / "thumbnail.png"
-        if existing_thumb.exists() and not force_regen:
-            job["thumbnail_url"] = f"/renders/{render_id}/{existing_thumb.name}"
-            _update(job, step="Thumbnail: reusing existing (0 credits)")
-        else:
+        # 5 · thumbnail — styled Reel cover via Higgsfield (fallback: copy identity image)
+        try:
+            thumb = await _generate_reel_thumbnail(
+                base_dir=base_dir,
+                blueprint=blueprint,
+                use_mcp=use_mcp,
+                mcp_client=mcp_client,
+                job=job,
+            )
+            if not thumb:
+                thumb = _fallback_thumbnail_copy(base_dir)
+                if thumb:
+                    _update(job, step=f"Thumbnail fallback — copied identity image ({thumb.name})")
+            if thumb:
+                job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
+            else:
+                _update(job, step="No image available for a thumbnail (skipped).")
+        except Exception as e:  # noqa: BLE001 — thumbnail must never fail the reel
+            logger.warning("thumbnail generation failed: %s", e)
             try:
-                thumb = await _generate_reel_thumbnail(
-                    base_dir=base_dir,
-                    blueprint=blueprint,
-                    use_mcp=use_mcp,
-                    mcp_client=mcp_client,
-                    job=job,
-                )
-                if not thumb:
-                    thumb = _fallback_thumbnail_copy(base_dir)
-                    if thumb:
-                        _update(job, step=f"Thumbnail fallback — copied identity image ({thumb.name})")
+                thumb = _fallback_thumbnail_copy(base_dir)
                 if thumb:
                     job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
-                else:
-                    _update(job, step="No image available for a thumbnail (skipped).")
-            except Exception as e:  # noqa: BLE001 — thumbnail must never fail the reel
-                logger.warning("thumbnail generation failed: %s", e)
-                try:
-                    thumb = _fallback_thumbnail_copy(base_dir)
-                    if thumb:
-                        job["thumbnail_url"] = f"/renders/{render_id}/{thumb.name}"
-                        _update(job, step=f"Thumbnail fallback after error — copied identity image")
-                except Exception:  # noqa: BLE001
-                    pass
+                    _update(job, step=f"Thumbnail fallback after error — copied identity image")
+            except Exception:  # noqa: BLE001
+                pass
 
         _update(job, status="completed", step="Done")
     except Exception as e:  # noqa: BLE001 — job must capture any failure
@@ -2485,29 +2792,85 @@ def identity_cache_status() -> dict:
 
 
 def regenerate_selected_scenes(render_id: str, scene_numbers: list[int],
-                               blueprint: SceneBlueprint) -> str:
-    """Regenerate ONLY the given scenes, in place. We delete just those scene clips,
-    then start a normal job — the scene-loop reuse logic keeps every other clip as-is
-    and regenerates only the missing (deleted) ones, then re-merges the reel. The
-    thumbnail is reused (not force_regen), so a clip rerun never re-spends on it.
-    Returns the new job id."""
-    vid_dir = RENDERS_DIR / render_id / "video"
-    deleted: list[str] = []
-    for n in scene_numbers:
-        for name in (f"scene_{int(n):02d}.mp4", f"scene_{int(n):02d}_raw.mp4"):
-            f = vid_dir / name
-            if f.exists():
-                f.unlink()
-                deleted.append(name)
-    logger.info("Regenerate render=%s scenes=%s (deleted %s) — only these will regenerate",
-                render_id, scene_numbers, deleted)
-    # reuse_existing_identity=True -> the identity images are FROZEN (reused exactly,
-    # never regenerated); only the deleted scene clips are re-rendered.
-    return start_job(render_id, blueprint, False, False, reuse_existing_identity=True)
+                                blueprint: SceneBlueprint) -> str:
+    """Kick off a background video job that regenerates ONLY the selected
+    scenes for an existing render and reuses every other scene's cached clip.
+
+    Called by `approval_gate.rerun_selected_scenes()` when the approval email
+    reviewer picks specific clips to re-roll after previewing the reel. The
+    caller expects a job id back and polls `JOBS[job_id]["status"]` to know
+    when the rebuild finishes.
+
+    Approach (minimal-surface):
+      1. Delete the .mp4 (and its .prompt.txt sidecar) for each selected
+         scene so the scene loop in `run_video_job` treats them as missing.
+      2. Delete the merged_reel.mp4 since it's now stale — the job's merge
+         step will rebuild it from the fresh + reused clips.
+      3. Start a normal video job. The built-in resume logic re-renders only
+         the deleted scenes and reuses every other scene for 0 credits.
+
+    No changes to `run_video_job` are needed — its per-scene reuse check
+    (clip exists AND >10 KB) is exactly the primitive we need.
+    """
+    base_dir = RENDERS_DIR / render_id
+    vid_dir = base_dir / "video"
+    if not base_dir.exists():
+        raise RuntimeError(f"regenerate_selected_scenes: no render at {base_dir}")
+
+    # De-duplicate + sanitise the input (the approval-gate wrapper already
+    # does this, but be defensive if this function is called directly).
+    numbers = sorted({int(n) for n in (scene_numbers or [])})
+    if not numbers:
+        raise RuntimeError("regenerate_selected_scenes: scene_numbers list is empty")
+
+    # Delete the selected clips so the resume logic treats them as missing.
+    removed_clips: list[str] = []
+    for n in numbers:
+        clip = vid_dir / f"scene_{n:02d}.mp4"
+        if clip.exists():
+            try:
+                clip.unlink()
+                removed_clips.append(clip.name)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("regenerate_selected_scenes: could not remove %s: %s",
+                               clip.name, e)
+        # The saved prompt sidecar becomes stale — remove it too so the
+        # freshly-written one reflects the actual prompt used for this take
+        # (useful for auditing / iterating on prompt fixes).
+        pmt = vid_dir / f"scene_{n:02d}.prompt.txt"
+        if pmt.exists():
+            try:
+                pmt.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # Merged output is now stale — remove it so the job's merge step
+    # rebuilds it from the fresh + reused clips.
+    merged = vid_dir / "merged_reel.mp4"
+    if merged.exists():
+        try:
+            merged.unlink()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("regenerate_selected_scenes: could not remove merged_reel.mp4: %s", e)
+
+    logger.info(
+        "regenerate_selected_scenes: render=%s, re-rendering scenes %s "
+        "(deleted %d existing clip file(s)). Other scenes will be reused "
+        "for 0 credits.",
+        render_id, numbers, len(removed_clips),
+    )
+
+    # Kick off a normal video job. Identity images stay locked / cached and
+    # every non-selected scene is reused — so this costs credits only for
+    # the scenes we just deleted.
+    return start_job(
+        render_id, blueprint,
+        force_regen_identity=False,
+        force_regen_scenes=False,
+    )
 
 
-def start_job(render_id: str, blueprint: SceneBlueprint, force_regen_identity: bool = False,
-              force_regen_scenes: bool = False, reuse_existing_identity: bool = False) -> str:
+def start_job(render_id: str, blueprint: SceneBlueprint, force_regen_identity: bool = False, force_regen_scenes: bool = False) -> str:
     job_id = uuid.uuid4().hex[:10]
     JOBS[job_id] = {
         "job_id": job_id, "render_id": render_id,
@@ -2515,7 +2878,6 @@ def start_job(render_id: str, blueprint: SceneBlueprint, force_regen_identity: b
         "scenes": [], "images": {}, "merged_url": None, "error": None, "log": [],
         "cost_estimate": 0, "force_regen_identity": force_regen_identity,
         "force_regen_scenes": force_regen_scenes,
-        "reuse_existing_identity": reuse_existing_identity,
     }
     asyncio.get_event_loop().create_task(run_video_job(job_id, render_id, blueprint))
     return job_id
